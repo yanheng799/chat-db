@@ -1,0 +1,33 @@
+# 业务配置（非敏感信息）
+
+query:
+  timeout: 30              # SQL 执行超时（秒）
+  max_limit: 1000          # 最大返回行数
+  forbid_select_all: true  # 禁止 SELECT *
+
+cache:
+  ttl: 300                 # 查询结果缓存 TTL（秒）
+
+audit:
+  # 审核策略：none / risky / all
+  mode: "risky"
+  # 强制审核条件
+  force_on_llm_source: true       # 语义来源为 LLM 兜底时强制审核
+  sensitive_tables: []            # 敏感表列表
+  max_rows_threshold: 500         # 返回数据量超过此值触发审核
+  max_joins_threshold: 3          # JOIN 数超过此值触发审核
+
+metadata:
+  sync_cron: "0 3 * * *"   # 每天凌晨 3 点全量同步
+
+normalizer:
+  enum_fuzzy_threshold: 0.7       # 枚举模糊匹配阈值
+  name_match_threshold: 0.7       # 名称匹配阈值
+  llm_enum_confidence: 0.85       # LLM 枚举推断最低置信度
+
+healing:
+  max_retries: 3                  # 错误自愈最大重试次数
+
+logging:
+  level: "INFO"
+  format: "json"                  # json / console

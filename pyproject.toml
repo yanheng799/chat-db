@@ -1,0 +1,82 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "chat-db"
+version = "0.1.0"
+description = "自然语言数据库查询 Agent 系统"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "yanhe" }]
+readme = "README.md"
+
+dependencies = [
+    "langgraph",
+    "langchain",
+    "langchain-openai",
+    "sqlalchemy>=2.0",
+    "asyncpg",
+    "psycopg2-binary",
+    "pymilvus>=2.6",
+    "neo4j",
+    "redis",
+    "hiredis",
+    "fastapi",
+    "uvicorn[standard]",
+    "sse-starlette",
+    "sqlparse",
+    "pydantic>=2",
+    "pydantic-settings",
+    "structlog",
+    "pyyaml",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-cov",
+    "ruff",
+    "mypy",
+    "pre-commit",
+    "ipython",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "src/config",
+    "src/llm",
+    "src/db",
+    "src/metadata",
+    "src/learning",
+    "src/knowledge",
+    "src/normalizer",
+    "src/semantic",
+    "src/sql",
+    "src/pipeline",
+    "src/agents",
+    "src/healing",
+    "src/memory",
+    "src/profile",
+    "src/api",
+    "src/utils",
+]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "UP", "B", "SIM"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+asyncio_mode = "auto"
+
+[tool.coverage.run]
+source = ["src"]
+
+[tool.coverage.report]
+fail_under = 0
