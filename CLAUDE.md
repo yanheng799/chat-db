@@ -73,6 +73,30 @@ All config via `.env` (pydantic-settings). No YAML config file. `.env.example` i
 
 Hatchling with explicit package list in `[tool.hatch.build.targets.wheel].packages`. When adding a new package under `src/`, it must be added to this list in `pyproject.toml`.
 
+## Coding Standards
+
+### Design Principles
+
+Three rules to follow when writing code. Choose specific design patterns at implementation time based on context.
+
+1. **Open-Closed Principle (OCP)** — Extend behavior via strategy/plugin/protocol, do not modify existing working code. When adding a new matching strategy or a new normalizer, add a new class rather than editing the dispatcher.
+2. **Dependency Inversion (DIP)** — Depend on abstractions (protocols/base classes), not concrete implementations. LLM, vector store, graph DB, and cache must all be accessed through abstract interfaces so implementations are swappable.
+3. **Single Responsibility (SRP)** — Each module/class does one thing. Aligns with the 15-package structure — if a module does two things, split it.
+
+### No Placeholders
+
+**Absolute prohibition**: No `TODO`, `FIXME`, `pass`, `NotImplementedError`, `...`, or any other placeholder in production code. Every function must have a complete, working implementation. If a piece of logic is not yet designed, design it first, then implement it fully.
+
+### TDD Workflow (Module-Level)
+
+Every module must follow this sequence:
+
+1. **Define interface** — Analyze module responsibilities, define public API (function signatures, data classes, protocols)
+2. **Write tests first** — Write test cases covering main behaviors in the corresponding `test/` subdirectory. Tests must fail at this stage (Red)
+3. **Implement minimum code** — Write the simplest code that makes all tests pass (Green)
+4. **Refactor** — Clean up while keeping tests green. Apply design principles during this step
+5. **Update build config** — If a new package was added under `src/`, add it to `[tool.hatch.build.targets.wheel].packages` in `pyproject.toml
+
 ## Design Documents
 
 - `docs/自然语言数据库查询需求设计.md` — V5.0 final spec (system architecture, agent flow, all subsystems)
