@@ -66,7 +66,6 @@ chat-db/
 ├── test/                 # 测试（镜像 src 结构）
 ├── docs/                 # 文档
 ├── pyproject.toml        # 项目配置
-├── config.yaml           # 业务配置
 └── .env.example          # 环境变量模板
 ```
 
