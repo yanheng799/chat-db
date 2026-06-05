@@ -6,7 +6,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Chat-DB is a natural language database query agent system. Users query databases via conversational input in plain Chinese (including industry jargon). The system understands intent, standardizes query values, plans query steps, generates read-only SQL, and supports configurable human review. Built with multi-agent orchestration (LangGraph).
 
-## Commands
+**Tech stack**: Python ≥ 3.11 · LangGraph · LangChain + Qwen3 (DashScope) · Milvus · Neo4j · Redis · PostgreSQL · FastAPI · SQLAlchemy 2.0 async
+
+## Quick Commands
 
 ```bash
 # Install dependencies (use system Python's uv, not venv's)
@@ -18,8 +20,7 @@ python -m uv sync --extra dev --index-url https://pypi.tuna.tsinghua.edu.cn/simp
 .venv/Scripts/python.exe -m pytest test/test_config/test_settings.py::test_x  # single test
 
 # Lint & format
-.venv/Scripts/ruff.exe check src/
-.venv/Scripts/ruff.exe format src/
+.venv/Scripts/ruff.exe check --fix src/ && .venv/Scripts/ruff.exe format src/
 
 # Run API server
 .venv/Scripts/python.exe -m uvicorn api.main:app --reload
@@ -27,77 +28,34 @@ python -m uv sync --extra dev --index-url https://pypi.tuna.tsinghua.edu.cn/simp
 
 **Note**: `uv` is installed via system Python (`D:/Python/Python311/python.exe -m uv`), not in the venv. Network to PyPI is unreliable — always use `--index-url https://pypi.tuna.tsinghua.edu.cn/simple`.
 
-## Architecture
+## Source Layout
 
-### Source layout (`src/`)
+Flat package structure — `src/` contains 16 business packages directly, no intermediate namespace. Each maps to a subsystem in the design doc.
 
-Flat package structure — `src/` contains business packages directly, no intermediate namespace. Each package maps to a subsystem in the design doc (`docs/自然语言数据库查询需求设计.md`).
+**Test layout mirrors src/**: `test/test_sql/test_security.py` tests `src/sql/security.py`.
 
-**Data flow (query lifecycle):**
-```
-User Input
-  → agents/joint_analysis    (intent check + value normalization + term translation)
-  → normalizer/*             (time/enum/region/name/quantifier standardization)
-  → semantic/matcher         (4-layer: hot-words → industry → vector → LLM fallback)
-  → agents/plan_generator    (multi-step DAG planning, graph-based JOIN path)
-  → sql/generator + security (SQL gen, blacklist/whitelist validation)
-  → agents/executor_auditor  (audit gate → execute → cache)
-  → healing/*                (error self-healing on failure)
-```
+**Configuration**: All via `.env` (pydantic-settings). No YAML config. Copy `.env.example` to `.env`.
 
-**Knowledge layer (populated offline):**
-- `metadata/` + `learning/` — extract schema (L0), infer semantics (L1 rules, L2 LLM)
-- `knowledge/` — Milvus vectors, Neo4j graph (JOIN paths, foreign keys), hot-word dict, value mappings
-- `memory/` — Redis session cache, conversation summaries
-- `profile/` — async user feature tracking
+**Build system**: Hatchling. New packages under `src/` must be added to `[tool.hatch.build.targets.wheel].packages` in `pyproject.toml`.
 
-### Test layout (`test/`)
+## Agent Harness Documentation
 
-Mirrors `src/` structure: `test/test_sql/test_security.py` tests `src/sql/security.py`.
+详细命令说明、架构地图、编码规则、验证策略、评审清单和已知失败模式都在 harness 文档中：
 
-### Configuration
+→ **[docs/agent-harness/index.md](docs/agent-harness/index.md)** — harness 文档总入口
 
-All config via `.env` (pydantic-settings). No YAML config file. `.env.example` is the template — copy to `.env` and fill values. `.env` is gitignored.
-
-### Key dependencies
-
-- **Agent orchestration**: langgraph (latest)
-- **LLM calls**: langchain + langchain-openai (Qwen3 via DashScope OpenAI-compatible API)
-- **Embeddings**: bge-large-zh-v1.5 via local endpoint (port 8001)
-- **Vector store**: pymilvus >= 2.6
-- **Graph DB**: neo4j (bolt://127.0.0.1:7687)
-- **DB**: sqlalchemy >= 2.0 async (asyncpg driver)
-- **Web**: fastapi + uvicorn + sse-starlette
-
-### Build system
-
-Hatchling with explicit package list in `[tool.hatch.build.targets.wheel].packages`. When adding a new package under `src/`, it must be added to this list in `pyproject.toml`.
-
-## Coding Standards
-
-### Design Principles
-
-Three rules to follow when writing code. Choose specific design patterns at implementation time based on context.
-
-1. **Open-Closed Principle (OCP)** — Extend behavior via strategy/plugin/protocol, do not modify existing working code. When adding a new matching strategy or a new normalizer, add a new class rather than editing the dispatcher.
-2. **Dependency Inversion (DIP)** — Depend on abstractions (protocols/base classes), not concrete implementations. LLM, vector store, graph DB, and cache must all be accessed through abstract interfaces so implementations are swappable.
-3. **Single Responsibility (SRP)** — Each module/class does one thing. Aligns with the 15-package structure — if a module does two things, split it.
-
-### No Placeholders
-
-**Absolute prohibition**: No `TODO`, `FIXME`, `pass`, `NotImplementedError`, `...`, or any other placeholder in production code. Every function must have a complete, working implementation. If a piece of logic is not yet designed, design it first, then implement it fully.
-
-### TDD Workflow (Module-Level)
-
-Every module must follow this sequence:
-
-1. **Define interface** — Analyze module responsibilities, define public API (function signatures, data classes, protocols)
-2. **Write tests first** — Write test cases covering main behaviors in the corresponding `test/` subdirectory. Tests must fail at this stage (Red)
-3. **Implement minimum code** — Write the simplest code that makes all tests pass (Green)
-4. **Refactor** — Clean up while keeping tests green. Apply design principles during this step
-5. **Update build config** — If a new package was added under `src/`, add it to `[tool.hatch.build.targets.wheel].packages` in `pyproject.toml
+| 文档 | 内容 |
+|------|------|
+| [commands.md](docs/agent-harness/commands.md) | 所有开发命令、适用场景、常见失败 |
+| [architecture-map.md](docs/agent-harness/architecture-map.md) | 模块边界、数据流、依赖关系 |
+| [coding-rules.md](docs/agent-harness/coding-rules.md) | OCP/DIP/SRP、禁止事项、TDD 工作流 |
+| [verification.md](docs/agent-harness/verification.md) | 按变更类型的验证策略 |
+| [review-rubric.md](docs/agent-harness/review-rubric.md) | 实现完成前的自查清单 |
+| [known-failures.md](docs/agent-harness/known-failures.md) | 已知失败模式与规避方式 |
+| [harness-debt.md](docs/agent-harness/harness-debt.md) | 阻碍 agent 独立工作的缺口 |
 
 ## Design Documents
 
 - `docs/自然语言数据库查询需求设计.md` — V5.0 final spec (system architecture, agent flow, all subsystems)
 - `docs/development-plan.md` — phased implementation plan (12 phases, dependency graph)
+- **注意**：开发计划中使用 `backend/` 路径前缀，实际代码在 `src/` 下，以实际路径为准
