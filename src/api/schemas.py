@@ -53,3 +53,24 @@ class DataSourceResponse(BaseModel):
 class ConnectionTestResponse(BaseModel):
     success: bool
     message: str | None = None
+
+
+class MetadataOverview(BaseModel):
+    table_count: int
+    column_count: int
+
+
+class SyncLogResponse(BaseModel):
+    id: uuid.UUID
+    data_source_id: uuid.UUID
+    sync_type: str
+    scope: list[dict] | None = None
+    status: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    tables_added: int | None = None
+    tables_removed: int | None = None
+    columns_changed: int | None = None
+    error_message: str | None = None
+
+    model_config = {"from_attributes": True}

@@ -22,8 +22,16 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
     )
     session_factory = async_sessionmaker(engine, expire_on_commit=False)
     async with session_factory() as session:
-        # Clean data_sources table before each test
+        # Clean tables in reverse FK order
+        from metadata.models import MetadataChangeLog, MetadataForeignKey, MetadataIndex, MetadataColumn, MetadataTable, MetadataSyncLog
         from config.data_source_model import DataSource
+
+        await session.execute(MetadataChangeLog.__table__.delete())
+        await session.execute(MetadataForeignKey.__table__.delete())
+        await session.execute(MetadataIndex.__table__.delete())
+        await session.execute(MetadataColumn.__table__.delete())
+        await session.execute(MetadataTable.__table__.delete())
+        await session.execute(MetadataSyncLog.__table__.delete())
         await session.execute(DataSource.__table__.delete())
         await session.commit()
         yield session

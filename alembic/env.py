@@ -11,7 +11,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from config.settings import Settings  # noqa: E402
 from config.models import Base  # noqa: E402
-import config.data_source_model  # noqa: F401 — register model for autogenerate
+import config.data_source_model  # noqa: F401
+import metadata.models  # noqa: F401 — register metadata models for autogenerate
 
 config = context.config
 
@@ -39,7 +40,7 @@ def run_migrations_offline() -> None:
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
     )
-    with context_begin_transaction():
+    with context.begin_transaction():
         context.run_migrations()
 
 
