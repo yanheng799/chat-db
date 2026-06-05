@@ -23,7 +23,7 @@ from config.database import get_session
 from config.encryption import decrypt_value, encrypt_value
 from config.settings import Settings
 from db.connection import ConnectionManager
-from metadata.extractor import PgMetadataExtractor
+from metadata.extractor import MySqlMetadataExtractor, PgMetadataExtractor
 from metadata.models import (
     MetadataColumn,
     MetadataSyncLog,
@@ -241,7 +241,10 @@ async def _run_metadata_extraction(datasource_id: uuid.UUID, ds_config: dict) ->
 
         try:
             async with engine.connect() as conn:
-                extractor = PgMetadataExtractor(conn)
+                if ds_config["engine"] == "mysql":
+                    extractor = MySqlMetadataExtractor(conn)
+                else:
+                    extractor = PgMetadataExtractor(conn)
                 data = await extractor.extract(ds_config.get("schema_whitelist"))
 
             tables_count = 0
