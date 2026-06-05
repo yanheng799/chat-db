@@ -55,6 +55,20 @@ class ConnectionTestResponse(BaseModel):
     message: str | None = None
 
 
+class TableScopeItem(BaseModel):
+    schema_name: str = Field(..., alias="schema")
+    table: str
+
+
+class SyncRequest(BaseModel):
+    table_scope: list[TableScopeItem] | None = None
+
+
+class SyncResponse(BaseModel):
+    sync_log_id: uuid.UUID
+    message: str
+
+
 class MetadataOverview(BaseModel):
     table_count: int
     column_count: int

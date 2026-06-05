@@ -17,6 +17,8 @@ from api.schemas import (
     DataSourceUpdate,
     MetadataOverview,
     SyncLogResponse,
+    SyncRequest,
+    SyncResponse,
 )
 from config.data_source_model import DataSource
 from config.database import get_session
@@ -25,10 +27,12 @@ from config.settings import Settings
 from db.connection import ConnectionManager
 from metadata.extractor import MySqlMetadataExtractor, PgMetadataExtractor
 from metadata.models import (
+    MetadataChangeLog,
     MetadataColumn,
     MetadataSyncLog,
     MetadataTable,
 )
+from metadata.sync import compute_diff
 
 router = APIRouter(prefix="/api/datasources", tags=["datasources"])
 
@@ -332,3 +336,225 @@ async def get_sync_logs(ds_id: uuid.UUID, session: SessionDep) -> list[SyncLogRe
     )
     logs = result.scalars().all()
     return [SyncLogResponse.model_validate(log) for log in logs]
+
+
+# ── Manual Sync ──────────────────────────────────────────────────
+
+
+@router.post("/{ds_id}/sync", status_code=202)
+async def trigger_sync(
+    ds_id: uuid.UUID,
+    session: SessionDep,
+    payload: SyncRequest | None = None,
+) -> SyncResponse:
+    ds = await _get_ds_or_404(ds_id, session)
+    # Concurrent sync prevention
+    running_result = await session.execute(
+        select(MetadataSyncLog).where(
+            MetadataSyncLog.data_source_id == ds_id,
+            MetadataSyncLog.status == "running",
+        )
+    )
+    if running_result.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="A sync is already in progress for this data source")
+
+    scope_items = payload.table_scope if payload and payload.table_scope else None
+    scope_list = [{"schema": s.schema_name, "table": s.table} for s in scope_items] if scope_items else None
+
+    sync_log_id = uuid.uuid4()
+    sync_log = MetadataSyncLog(
+        id=sync_log_id,
+        data_source_id=ds_id,
+        sync_type="manual",
+        scope=scope_list,
+        status="running",
+        started_at=datetime.now(),
+    )
+    session.add(sync_log)
+    await session.commit()
+
+    key = _get_encryption_key()
+    ds_config = {
+        "id": str(ds.id),
+        "engine": ds.engine,
+        "host": ds.host,
+        "port": ds.port,
+        "username": ds.username,
+        "password": decrypt_value(ds.password_encrypted, key),
+        "database": ds.database,
+        "schema_whitelist": ds.schema_whitelist,
+    }
+    asyncio.create_task(_run_sync(ds.id, sync_log_id, ds_config, scope_items))
+
+    return SyncResponse(
+        sync_log_id=sync_log_id,
+        message="Sync started in background",
+    )
+
+
+async def _run_sync(
+    datasource_id: uuid.UUID,
+    sync_log_id: uuid.UUID,
+    ds_config: dict,
+    table_scope: list | None = None,
+) -> None:
+    from config.database import get_session as _get_session
+
+    async for session in _get_session():
+        engine_config = {
+            "id": ds_config["id"],
+            "engine": ds_config["engine"],
+            "host": ds_config["host"],
+            "port": ds_config["port"],
+            "username": ds_config["username"],
+            "password": ds_config["password"],
+            "database": ds_config["database"],
+        }
+        engine = _connection_manager.create_engine(engine_config)
+
+        try:
+            async with engine.connect() as conn:
+                if ds_config["engine"] == "mysql":
+                    from metadata.extractor import MySqlMetadataExtractor as Ex
+                else:
+                    from metadata.extractor import PgMetadataExtractor as Ex
+                extractor = Ex(conn)
+                current = await extractor.extract(ds_config.get("schema_whitelist"))
+
+            # Build stored metadata from DB
+            stored_tables = await _build_stored_metadata(datasource_id, session)
+
+            # Filter current data if table_scope specified
+            if table_scope:
+                scope_keys = {(s.schema_name, s.table) for s in table_scope}
+                current = {
+                    "tables": [t for t in current["tables"] if (t["table_schema"], t["table_name"]) in scope_keys],
+                    "columns": [c for c in current["columns"] if (c["table_schema"], c["table_name"]) in scope_keys],
+                    "indexes": [i for i in current["indexes"] if (i["table_schema"], i["table_name"]) in scope_keys],
+                    "foreign_keys": [
+                        f for f in current["foreign_keys"] if (f["table_schema"], f["table_name"]) in scope_keys
+                    ],
+                }
+
+            changes = compute_diff(current, stored_tables)
+
+            # Record change logs and apply changes
+            for ch in changes:
+                session.add(
+                    MetadataChangeLog(
+                        id=uuid.uuid4(),
+                        sync_log_id=sync_log_id,
+                        data_source_id=datasource_id,
+                        change_type=ch["change_type"],
+                        schema_name=ch["schema_name"],
+                        table_name=ch["table_name"],
+                        object_name=ch["object_name"],
+                        before_value=ch["before_value"],
+                        after_value=ch["after_value"],
+                    )
+                )
+
+            # Apply changes to metadata tables
+            tables_added = sum(1 for c in changes if c["change_type"] == "table_added")
+            tables_removed = sum(1 for c in changes if c["change_type"] == "table_removed")
+            cols_changed = sum(1 for c in changes if c["change_type"].startswith(("column_", "index_", "fk_")))
+
+            await _apply_changes(session, changes, datasource_id)
+
+            # Update sync_log
+            result = await session.execute(select(MetadataSyncLog).where(MetadataSyncLog.id == sync_log_id))
+            log = result.scalar_one_or_none()
+            if log is not None:
+                log.status = "success"
+                log.finished_at = datetime.now()
+                log.tables_added = tables_added
+                log.tables_removed = tables_removed
+                log.columns_changed = cols_changed
+            await session.commit()
+        except Exception as e:
+            result = await session.execute(select(MetadataSyncLog).where(MetadataSyncLog.id == sync_log_id))
+            log = result.scalar_one_or_none()
+            if log is not None:
+                log.status = "failed"
+                log.finished_at = datetime.now()
+                log.error_message = str(e)
+            with contextlib.suppress(Exception):
+                await session.commit()
+        finally:
+            _connection_manager.dispose_sync(ds_config["id"])
+
+
+async def _build_stored_metadata(datasource_id: uuid.UUID, session) -> dict:
+    """Build stored metadata dict from DB for diff comparison."""
+    tables_result = await session.execute(select(MetadataTable).where(MetadataTable.data_source_id == datasource_id))
+    tables = tables_result.scalars().all()
+
+    stored_tables = []
+    stored_columns = []
+    stored_indexes = []
+    stored_fks = []
+
+    for t in tables:
+        stored_tables.append({"table_schema": t.schema_name, "table_name": t.table_name})
+        # Columns
+        cols = await session.execute(select(MetadataColumn).where(MetadataColumn.table_id == t.id))
+        for c in cols.scalars().all():
+            stored_columns.append(
+                {
+                    "table_schema": t.schema_name,
+                    "table_name": t.table_name,
+                    "column_name": c.column_name,
+                    "data_type": c.data_type,
+                    "is_nullable": "YES" if c.is_nullable else "NO",
+                }
+            )
+        # Indexes
+        from metadata.models import MetadataForeignKey, MetadataIndex
+
+        idxs = await session.execute(select(MetadataIndex).where(MetadataIndex.table_id == t.id))
+        for i in idxs.scalars().all():
+            stored_indexes.append(
+                {
+                    "table_schema": t.schema_name,
+                    "table_name": t.table_name,
+                    "index_name": i.index_name,
+                }
+            )
+        # FKs
+        fks = await session.execute(select(MetadataForeignKey).where(MetadataForeignKey.table_id == t.id))
+        for f in fks.scalars().all():
+            stored_fks.append(
+                {
+                    "table_schema": t.schema_name,
+                    "table_name": t.table_name,
+                    "constraint_name": f.constraint_name,
+                }
+            )
+
+    return {"tables": stored_tables, "columns": stored_columns, "indexes": stored_indexes, "foreign_keys": stored_fks}
+
+
+async def _apply_changes(session, changes: list[dict], datasource_id: uuid.UUID) -> None:
+    """Apply diff changes to metadata tables."""
+    for ch in changes:
+        if ch["change_type"] == "table_added":
+            session.add(
+                MetadataTable(
+                    id=uuid.uuid4(),
+                    data_source_id=datasource_id,
+                    schema_name=ch["schema_name"],
+                    table_name=ch["table_name"],
+                )
+            )
+        elif ch["change_type"] == "table_removed":
+            result = await session.execute(
+                select(MetadataTable).where(
+                    MetadataTable.data_source_id == datasource_id,
+                    MetadataTable.schema_name == ch["schema_name"],
+                    MetadataTable.table_name == ch["table_name"],
+                )
+            )
+            table = result.scalar_one_or_none()
+            if table is not None:
+                await session.delete(table)
+    await session.commit()
