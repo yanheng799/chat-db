@@ -25,7 +25,7 @@ class ConnectionManager:
                 f":{config['password']}@{config['host']}"
                 f":{config['port']}/{config['database']}"
             )
-            connect_args = {"init_command": "SET SESSION max_execution_time=30000"}
+            connect_args = {"init_command": "SET SESSION max_execution_time=30000; SET SESSION TRANSACTION READ ONLY"}
 
         return create_async_engine(url, pool_size=5, max_overflow=10, connect_args=connect_args)
 
