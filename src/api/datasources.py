@@ -354,6 +354,18 @@ async def trigger_sync(
     payload: SyncRequest | None = None,
 ) -> SyncResponse:
     ds = await _get_ds_or_404(ds_id, session)
+    # Mutex: reject if a learning task is running
+    from fastapi import HTTPException
+
+    running_learn = await session.execute(
+        select(MetadataLearningLog).where(
+            MetadataLearningLog.data_source_id == ds_id,
+            MetadataLearningLog.status == "running",
+        )
+    )
+    if running_learn.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="A learning task is already running for this data source.")
+
     # Concurrent sync prevention
     running_result = await session.execute(
         select(MetadataSyncLog).where(
@@ -467,6 +479,9 @@ async def _run_sync(
 
             await _apply_changes(session, changes, datasource_id)
 
+            # L0 staleness refresh: update semantic_description for comment-sourced fields
+            await _refresh_l0_descriptions(session, changes, datasource_id)
+
             # Update sync_log
             result = await session.execute(select(MetadataSyncLog).where(MetadataSyncLog.id == sync_log_id))
             log = result.scalar_one_or_none()
@@ -490,6 +505,70 @@ async def _run_sync(
             _connection_manager.dispose_sync(ds_config["id"])
 
 
+async def _refresh_l0_descriptions(
+    session: AsyncSession,
+    changes: list[dict],
+    datasource_id: uuid.UUID,
+) -> None:
+    """Refresh semantic_description for comment-sourced fields after sync.
+
+    Only updates fields where description_source = "schema_comment".
+    Does not trigger L1/L2 rerun.
+    """
+    # Collect tables/columns that had comment changes
+    comment_changed_tables: set[str] = set()
+    comment_changed_cols: dict[str, str] = {}  # col_key -> new_comment
+
+    for ch in changes:
+        if ch["change_type"] == "column_modified":
+            after = ch.get("after_value") or {}
+            before = ch.get("before_value") or {}
+            if after.get("column_comment") != before.get("column_comment"):
+                key = f"{ch['schema_name']}.{ch['table_name']}.{ch['object_name']}"
+                comment_changed_cols[key] = after.get("column_comment")
+        elif ch["change_type"] == "table_modified":
+            after = ch.get("after_value") or {}
+            before = ch.get("before_value") or {}
+            if after.get("table_comment") != before.get("table_comment"):
+                comment_changed_tables.add(f"{ch['schema_name']}.{ch['table_name']}")
+
+    if not comment_changed_tables and not comment_changed_cols:
+        return
+
+    # Refresh table-level descriptions
+    if comment_changed_tables:
+        tables_result = await session.execute(
+            select(MetadataTable).where(
+                MetadataTable.data_source_id == datasource_id,
+                MetadataTable.description_source == "schema_comment",
+            )
+        )
+        for table in tables_result.scalars().all():
+            table_key = f"{table.schema_name}.{table.table_name}"
+            if table_key in comment_changed_tables:
+                table.semantic_description = table.table_comment
+
+    # Refresh column-level descriptions
+    if comment_changed_cols:
+        cols_result = await session.execute(
+            select(MetadataColumn, MetadataTable.schema_name, MetadataTable.table_name)
+            .join(MetadataTable, MetadataColumn.table_id == MetadataTable.id)
+            .where(
+                MetadataTable.data_source_id == datasource_id,
+                MetadataColumn.description_source == "schema_comment",
+            )
+        )
+        for row in cols_result.all():
+            col = row[0]
+            schema_name = row[1]
+            table_name = row[2]
+            key = f"{schema_name}.{table_name}.{col.column_name}"
+            if key in comment_changed_cols:
+                col.semantic_description = comment_changed_cols[key]
+
+    await session.commit()
+
+
 async def _build_stored_metadata(datasource_id: uuid.UUID, session) -> dict:
     """Build stored metadata dict from DB for diff comparison."""
     tables_result = await session.execute(select(MetadataTable).where(MetadataTable.data_source_id == datasource_id))
@@ -501,7 +580,13 @@ async def _build_stored_metadata(datasource_id: uuid.UUID, session) -> dict:
     stored_fks = []
 
     for t in tables:
-        stored_tables.append({"table_schema": t.schema_name, "table_name": t.table_name})
+        stored_tables.append(
+            {
+                "table_schema": t.schema_name,
+                "table_name": t.table_name,
+                "table_comment": t.table_comment,
+            }
+        )
         # Columns
         cols = await session.execute(select(MetadataColumn).where(MetadataColumn.table_id == t.id))
         for c in cols.scalars().all():
@@ -512,6 +597,7 @@ async def _build_stored_metadata(datasource_id: uuid.UUID, session) -> dict:
                     "column_name": c.column_name,
                     "data_type": c.data_type,
                     "is_nullable": "YES" if c.is_nullable else "NO",
+                    "column_comment": c.column_comment,
                 }
             )
         # Indexes
@@ -570,11 +656,24 @@ async def _apply_changes(session, changes: list[dict], datasource_id: uuid.UUID)
 
 
 async def _run_learning_auto(datasource_id: uuid.UUID) -> None:
-    """Run learning pipeline automatically after metadata extraction."""
+    """Run learning pipeline automatically after metadata extraction.
+
+    Includes mutex check: skips if a sync is running.
+    """
     from config.database import get_session as _get_session
     from learning.orchestrator import run_learning
 
     async for session in _get_session():
+        # Mutex: skip if a sync is running
+        running_sync = await session.execute(
+            select(MetadataSyncLog).where(
+                MetadataSyncLog.data_source_id == datasource_id,
+                MetadataSyncLog.status == "running",
+            )
+        )
+        if running_sync.scalar_one_or_none() is not None:
+            return
+
         with contextlib.suppress(Exception):
             await run_learning(session, datasource_id, trigger_type="auto")
 
@@ -582,6 +681,18 @@ async def _run_learning_auto(datasource_id: uuid.UUID) -> None:
 @router.post("/{ds_id}/learn", status_code=202)
 async def trigger_learn(ds_id: uuid.UUID, session: SessionDep) -> LearnResponse:
     await _get_ds_or_404(ds_id, session)
+
+    # Mutex: reject if a sync is running
+    from fastapi import HTTPException
+
+    running_sync = await session.execute(
+        select(MetadataSyncLog).where(
+            MetadataSyncLog.data_source_id == ds_id,
+            MetadataSyncLog.status == "running",
+        )
+    )
+    if running_sync.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="A sync task is already running for this data source.")
 
     # Run learning synchronously within the request session for Issue 001
     # (L0 only, no background task needed since it's fast)
