@@ -88,3 +88,26 @@ class SyncLogResponse(BaseModel):
     error_message: str | None = None
 
     model_config = {"from_attributes": True}
+
+
+class LearnResponse(BaseModel):
+    learning_log_id: uuid.UUID
+    message: str
+
+
+class LearningLogResponse(BaseModel):
+    id: uuid.UUID
+    data_source_id: uuid.UUID
+    trigger_type: str
+    status: str
+    started_at: datetime
+    finished_at: datetime | None = None
+    tables_processed: int | None = None
+    columns_described: int | None = None
+    l0_count: int | None = None
+    l1_count: int | None = None
+    l2_count: int | None = None
+    l2_llm_calls: int | None = None
+    error_message: str | None = None
+
+    model_config = {"from_attributes": True}

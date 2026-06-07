@@ -15,6 +15,8 @@ from api.schemas import (
     DataSourceCreate,
     DataSourceResponse,
     DataSourceUpdate,
+    LearningLogResponse,
+    LearnResponse,
     MetadataOverview,
     SyncLogResponse,
     SyncRequest,
@@ -29,6 +31,7 @@ from metadata.extractor import MySqlMetadataExtractor, PgMetadataExtractor
 from metadata.models import (
     MetadataChangeLog,
     MetadataColumn,
+    MetadataLearningLog,
     MetadataSyncLog,
     MetadataTable,
 )
@@ -293,6 +296,9 @@ async def _run_metadata_extraction(datasource_id: uuid.UUID, ds_config: dict) ->
             sync_log.tables_added = tables_count
             sync_log.columns_changed = columns_count
             await session.commit()
+
+            # Auto-trigger learning after successful extraction
+            asyncio.create_task(_run_learning_auto(datasource_id))
         except Exception as e:
             result = await session.execute(select(MetadataSyncLog).where(MetadataSyncLog.id == sync_log_id))
             log = result.scalar_one_or_none()
@@ -558,3 +564,44 @@ async def _apply_changes(session, changes: list[dict], datasource_id: uuid.UUID)
             if table is not None:
                 await session.delete(table)
     await session.commit()
+
+
+# ── Learning ────────────────────────────────────────────────────
+
+
+async def _run_learning_auto(datasource_id: uuid.UUID) -> None:
+    """Run learning pipeline automatically after metadata extraction."""
+    from config.database import get_session as _get_session
+    from learning.orchestrator import run_learning
+
+    async for session in _get_session():
+        with contextlib.suppress(Exception):
+            await run_learning(session, datasource_id, trigger_type="auto")
+
+
+@router.post("/{ds_id}/learn", status_code=202)
+async def trigger_learn(ds_id: uuid.UUID, session: SessionDep) -> LearnResponse:
+    await _get_ds_or_404(ds_id, session)
+
+    # Run learning synchronously within the request session for Issue 001
+    # (L0 only, no background task needed since it's fast)
+    from learning.orchestrator import run_learning
+
+    learning_log_id = await run_learning(session, ds_id, trigger_type="manual")
+
+    return LearnResponse(
+        learning_log_id=learning_log_id,
+        message="Learning completed",
+    )
+
+
+@router.get("/{ds_id}/learning-logs")
+async def get_learning_logs(ds_id: uuid.UUID, session: SessionDep) -> list[LearningLogResponse]:
+    await _get_ds_or_404(ds_id, session)
+    result = await session.execute(
+        select(MetadataLearningLog)
+        .where(MetadataLearningLog.data_source_id == ds_id)
+        .order_by(MetadataLearningLog.started_at.desc())
+    )
+    logs = result.scalars().all()
+    return [LearningLogResponse.model_validate(log) for log in logs]
