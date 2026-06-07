@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -22,6 +22,11 @@ class MetadataTable(Base):
     table_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now, onupdate=datetime.now)
+
+    # Learning fields
+    semantic_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_source: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    description_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     columns_rel: Mapped[list["MetadataColumn"]] = relationship(
         "MetadataColumn", back_populates="table", cascade="all, delete-orphan"
@@ -47,6 +52,14 @@ class MetadataColumn(Base):
     column_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_primary_key: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     ordinal_position: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    # Learning fields
+    semantic_description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_source: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    description_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    detected_enum_values: Mapped[list | None] = mapped_column(JSONB, nullable=True)
+    null_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    numeric_range: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     table: Mapped["MetadataTable"] = relationship("MetadataTable", back_populates="columns_rel")
 
@@ -74,7 +87,7 @@ class MetadataForeignKey(Base):
     column_name: Mapped[str] = mapped_column(String(100), nullable=False)
     target_schema: Mapped[str] = mapped_column(String(100), nullable=False)
     target_table: Mapped[str] = mapped_column(String(100), nullable=False)
-    target_column: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_column: Mapped[str] = mapped_column(String(100), nullable=True)
 
     table: Mapped["MetadataTable"] = relationship("MetadataTable", back_populates="foreign_keys_rel")
 
@@ -129,3 +142,27 @@ class MetadataChangeLog(Base):
     object_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
     before_value: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     after_value: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
+class MetadataLearningLog(Base):
+    __tablename__ = "metadata_learning_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    data_source_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("data_sources.id", ondelete="CASCADE"), nullable=False)
+    trigger_type: Mapped[str] = mapped_column(
+        Enum("auto", "manual", name="enum_learning_trigger_type"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        Enum("running", "success", "partial_success", "failed", "aborted", name="enum_learning_status"),
+        nullable=False,
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    tables_processed: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    columns_described: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    l0_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    l1_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    l2_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    l2_llm_calls: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

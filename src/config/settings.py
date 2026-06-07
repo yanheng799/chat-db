@@ -62,4 +62,8 @@ class Settings(BaseSettings):
     # Metadata sync
     metadata_sync_interval_hours: int = 24
 
+    # Learning
+    learning_l2_max_concurrency: int = 5
+    learning_job_timeout_minutes: int = 60
+
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
