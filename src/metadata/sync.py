@@ -37,6 +37,20 @@ def compute_diff(current: dict, stored: dict) -> list[dict]:
                     "after_value": None,
                 }
             )
+        else:
+            # Check for table-level modifications (e.g. table_comment change)
+            ct = current_tables[key]
+            if ct.get("table_comment") != st.get("table_comment"):
+                changes.append(
+                    {
+                        "change_type": "table_modified",
+                        "schema_name": ct["table_schema"],
+                        "table_name": ct["table_name"],
+                        "object_name": ct["table_name"],
+                        "before_value": st,
+                        "after_value": ct,
+                    }
+                )
 
     # ── Column-level diff ────────────────────────────────────────
     current_cols = {(c["table_schema"], c["table_name"], c["column_name"]): c for c in current["columns"]}
@@ -59,7 +73,11 @@ def compute_diff(current: dict, stored: dict) -> list[dict]:
         else:
             # Check for modifications
             sc = stored_cols[key]
-            if cc.get("data_type") != sc.get("data_type") or cc.get("is_nullable") != sc.get("is_nullable"):
+            if (
+                cc.get("data_type") != sc.get("data_type")
+                or cc.get("is_nullable") != sc.get("is_nullable")
+                or cc.get("column_comment") != sc.get("column_comment")
+            ):
                 changes.append(
                     {
                         "change_type": "column_modified",
