@@ -312,6 +312,10 @@ async def run_learning(
         learning_log.l2_llm_calls = l2_llm_calls
         await session.commit()
 
+        # Knowledge base refresh (Phase 3): non-fatal, independent of learning status.
+        with contextlib.suppress(Exception):
+            await _refresh_knowledge_with_ds(session, data_source_id)
+
     except Exception as e:
         learning_log.status = "failed"
         learning_log.finished_at = datetime.now()
@@ -584,4 +588,28 @@ async def _run_l2_with_ds(
         session_factory,
         data_source_id,
         llm_caller=llm_caller,
+    )
+
+
+async def _refresh_knowledge_with_ds(
+    session: AsyncSession,
+    data_source_id: uuid.UUID,
+) -> None:
+    """Refresh the knowledge base (Milvus vectors + Neo4j graph) for the active source.
+
+    Builds the default ``field_descriptions`` collection and graph DB. Vector
+    failure is non-fatal (handled inside); the whole call is wrapped in
+    ``suppress(Exception)`` by ``run_learning`` so it never affects learning status.
+    """
+    from knowledge.embedding import EmbeddingClient
+    from knowledge.graph_store import GraphStore
+    from knowledge.lifecycle import refresh_knowledge_base
+    from knowledge.vector_store import VectorStore
+
+    await refresh_knowledge_base(
+        session,
+        data_source_id,
+        vector_store=VectorStore(),
+        graph_store=GraphStore(),
+        embedding_client=EmbeddingClient(),
     )

@@ -140,6 +140,14 @@ async def delete_data_source(ds_id: uuid.UUID, session: SessionDep) -> None:
     await session.delete(ds)
     await session.commit()
 
+    # Knowledge-base cleanup (Phase 3): app-DB CASCADE does not reach Milvus/Neo4j.
+    with contextlib.suppress(Exception):
+        from knowledge.graph_store import GraphStore
+        from knowledge.lifecycle import cleanup_knowledge_base
+        from knowledge.vector_store import VectorStore
+
+        await cleanup_knowledge_base(ds_id, vector_store=VectorStore(), graph_store=GraphStore())
+
 
 @router.post("/{ds_id}/test")
 async def test_connection(ds_id: uuid.UUID, session: SessionDep) -> ConnectionTestResponse:
