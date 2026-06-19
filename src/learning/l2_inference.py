@@ -1,12 +1,15 @@
-"""L2 LLM semantic inference — sample data, build prompts, parse responses.
+"""L2 LLM semantic inference — structured-signal prompt and response parsing.
 
 This module contains the components of L2:
 
-- :func:`build_sample_query` — builds a sampling query excluding BLOB types
-- :func:`build_llm_prompt` — constructs the LLM prompt
+- :class:`FieldSignal` — the structured signals available for one field
+- :func:`build_llm_prompt` — constructs the LLM prompt from structured signals only
 - :func:`parse_llm_response` — extracts column descriptions from LLM output
-- :func:`truncate_value` — truncates TEXT values at 200 characters
 - :func:`call_llm_with_retry` — LLM invocation with 429 retry
+
+Data-governance note (V1): L2 infers semantic descriptions from **structured
+signals only** — field name, data type, L1 enum values, L0 comment and the L1
+splitting result. No raw business-data rows are sent to the external LLM.
 """
 
 from __future__ import annotations
@@ -15,117 +18,70 @@ import asyncio
 import json
 import logging
 import re
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Protocol
 
 logger = logging.getLogger(__name__)
 
-# Binary/large-object types to exclude from sampling
-_BINARY_TYPES = frozenset(
-    {
-        "blob",
-        "binary",
-        "varbinary",
-        "bytea",
-        "longblob",
-        "mediumblob",
-        "tinyblob",
-        "image",
-        "oid",
-    }
-)
 
-# Maximum TEXT value length before truncation
-MAX_TEXT_LENGTH = 200
+@dataclass
+class FieldSignal:
+    """Structured signals available for one field during L2 inference.
 
-
-def is_binary_type(data_type: str) -> bool:
-    """Return True if *data_type* is a binary/large-object SQL type."""
-    return data_type.lower().split("(")[0].strip() in _BINARY_TYPES
-
-
-def truncate_value(value: Any) -> Any:
-    """Truncate string values exceeding :data:`MAX_TEXT_LENGTH` characters."""
-    if value is None:
-        return None
-    if isinstance(value, str) and len(value) > MAX_TEXT_LENGTH:
-        return value[:MAX_TEXT_LENGTH]
-    return value
-
-
-# ---------------------------------------------------------------------------
-# Sample query builder
-# ---------------------------------------------------------------------------
-
-
-def build_sample_query(
-    table_name: str,
-    schema_name: str | None,
-    columns: list[Any],
-    engine_type: str,
-) -> str | None:
-    """Build a ``SELECT … LIMIT 5`` query, excluding BLOB-type columns.
-
-    Returns ``None`` when no columns survive the BLOB filter (or when
-    *columns* is empty).
+    None of these carry raw business-data values: ``enum_values`` are the
+    de-duplicated enum candidates produced by L1 pattern detection (a small,
+    low-cardinality set), and ``comment`` is the schema comment extracted by L0.
     """
-    safe_cols = [c for c in columns if not is_binary_type(c.data_type)]
-    if not safe_cols:
-        return None
 
-    if engine_type == "postgresql":
-        fqn = f'"{schema_name}"."{table_name}"' if schema_name else f'"{table_name}"'
-        col_list = ", ".join(f'"{c.column_name}"' for c in safe_cols)
-    else:
-        fqn = f"`{table_name}`"
-        col_list = ", ".join(f"`{c.column_name}`" for c in safe_cols)
-
-    return f"SELECT {col_list} FROM {fqn} LIMIT 5"
+    name: str
+    data_type: str
+    enum_values: list[str] | None = None
+    comment: str | None = None
+    split: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # LLM prompt builder
 # ---------------------------------------------------------------------------
 
+
 _SYSTEM_PROMPT = """\
-你是一个数据库元数据标注助手。用户会给你一张数据库表的样本数据和需要推断的字段名列表。
-请根据样本数据推断每个字段的中文语义描述。
+你是一个数据库元数据标注助手。用户会给你一张数据库表的字段及其结构化信号（字段名、数据类型、枚举值、库注释、拆词结果），请据此推断每个字段的中文语义描述。你不会收到、也不应依据任何业务数据行的具体取值。
 
 要求：
 1. 仅返回 JSON 格式，不要返回其他内容。
 2. 格式为 {"columns": {"字段名": "语义描述"}}。
 3. 语义描述应简洁准确，不超过 20 个汉字。
-4. 不要记忆或输出样本中的具体数据值。
-5. 如果无法判断某个字段，其值设为 null。"""
+4. 如果无法判断某个字段，其值设为 null。"""
 
 
-def build_llm_prompt(
-    table_name: str,
-    field_names: list[str],
-    sample_rows: list[dict[str, Any]],
-) -> str:
+def _format_field(field_signal: FieldSignal) -> str:
+    """Render one field's structured signals as a single prompt line."""
+    parts = [f"字段名：{field_signal.name}", f"类型：{field_signal.data_type}"]
+    if field_signal.enum_values:
+        parts.append(f"枚举值：{', '.join(field_signal.enum_values)}")
+    if field_signal.comment:
+        parts.append(f"库注释：{field_signal.comment}")
+    if field_signal.split:
+        parts.append(f"拆词：{field_signal.split}")
+    return " | ".join(parts)
+
+
+def build_llm_prompt(table_name: str, fields: list[FieldSignal]) -> str:
     """Construct the user-message portion of the LLM prompt.
 
-    The prompt includes the table name, the list of fields to describe,
-    and a few sample rows for context.
+    The prompt contains only structured signals (field name, data type, L1 enum
+    values, L0 comment, splitting result). No raw business-data rows are
+    included.
     """
-    # Truncate sample values
-    safe_rows = []
-    for row in sample_rows:
-        safe_row = {k: truncate_value(v) for k, v in row.items()}
-        safe_rows.append(safe_row)
-
-    rows_text = ""
-    if safe_rows:
-        rows_text = "\n样本数据（仅供参考，不要输出具体值）：\n"
-        for row in safe_rows:
-            rows_text += f"  {row}\n"
-    else:
-        rows_text = "\n（无样本数据）\n"
+    field_lines = "\n".join(f"  - {_format_field(f)}" for f in fields)
 
     return (
         f"表名：{table_name}\n"
-        f"需要推断语义描述的字段：{field_names}"
-        f"{rows_text}\n"
+        f"需要推断语义描述的字段（仅结构化信号）：\n"
+        f"{field_lines}\n\n"
+        f"请仅依据以上结构化信号推断每个字段的中文语义描述，"
+        f"不要依据任何业务数据行的具体取值。\n"
         f'请返回 JSON：{{"columns": {{"字段名": "语义描述", ...}}}}'
     )
 
@@ -199,8 +155,7 @@ _MAX_RETRIES = 3
 async def call_llm_with_retry(
     caller: LLMCaller,
     table_name: str,
-    field_names: list[str],
-    sample_rows: list[dict[str, Any]],
+    fields: list[FieldSignal],
 ) -> dict[str, str] | None:
     """Call the LLM with exponential-backoff retry on rate-limit errors.
 
@@ -208,7 +163,7 @@ async def call_llm_with_retry(
     call fails after all retries (including non-rate-limit errors).
     """
     system_prompt = get_system_prompt()
-    user_prompt = build_llm_prompt(table_name, field_names, sample_rows)
+    user_prompt = build_llm_prompt(table_name, fields)
 
     for attempt in range(_MAX_RETRIES + 1):
         try:
@@ -231,3 +186,15 @@ async def call_llm_with_retry(
 
     logger.error("LLM call for table %s failed after %d retries", table_name, _MAX_RETRIES)
     return None
+
+
+# Re-export for backwards-compatible imports within the package
+__all__ = [
+    "FieldSignal",
+    "LLMCaller",
+    "RateLimitError",
+    "build_llm_prompt",
+    "call_llm_with_retry",
+    "get_system_prompt",
+    "parse_llm_response",
+]

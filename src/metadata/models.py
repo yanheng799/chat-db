@@ -92,6 +92,44 @@ class MetadataForeignKey(Base):
     table: Mapped["MetadataTable"] = relationship("MetadataTable", back_populates="foreign_keys_rel")
 
 
+class MetadataInferredForeignKey(Base):
+    """A foreign-key relationship inferred from value overlap (Phase 2 L1).
+
+    Separate from :class:`MetadataForeignKey` (which stores explicitly declared
+    FKs) so downstream consumers can distinguish declared vs inferred relations,
+    mirroring the graph layer's ``REFERENCES`` vs ``INFERRED_REF`` edges.
+    Recomputed and replaced on every learning run.
+    """
+
+    __tablename__ = "metadata_inferred_fks"
+    __table_args__ = (
+        UniqueConstraint(
+            "data_source_id",
+            "source_table",
+            "source_column",
+            "target_table",
+            "target_column",
+            name="uq_metadata_inferred_fks_pair",
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    data_source_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("data_sources.id", ondelete="CASCADE"), nullable=False
+    )
+    source_schema: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_table: Mapped[str] = mapped_column(String(100), nullable=False)
+    source_column: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_schema: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_table: Mapped[str] = mapped_column(String(100), nullable=False)
+    target_column: Mapped[str] = mapped_column(String(100), nullable=False)
+    overlap_rate: Mapped[float] = mapped_column(Float, nullable=False)
+    name_similarity: Mapped[float] = mapped_column(Float, nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False)
+    source: Mapped[str] = mapped_column(String(30), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.now)
+
+
 class MetadataSyncLog(Base):
     __tablename__ = "metadata_sync_logs"
 

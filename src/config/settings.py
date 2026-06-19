@@ -65,5 +65,6 @@ class Settings(BaseSettings):
     # Learning
     learning_l2_max_concurrency: int = 5
     learning_job_timeout_minutes: int = 60
+    learning_l2_max_calls: int = 200
 
     model_config = {"env_file": ".env", "env_file_encoding": "utf-8", "extra": "ignore"}
