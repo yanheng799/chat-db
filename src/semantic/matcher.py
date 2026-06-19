@@ -91,11 +91,12 @@ async def _try_llm_match(caller, text):
         matches = []
         for item in parsed:
             if item.get("table") and item.get("column"):
+                confidence = float(item.get("confidence", 0.7))
                 matches.append({
                     "table": item["table"], "column": item["column"],
                     "matched_by": "llm_fallback",
-                    "confidence": float(item.get("confidence", 0.7)),
-                    "need_confirm": True,
+                    "confidence": confidence,
+                    "need_confirm": confidence < 0.8,
                 })
         return matches if matches else None
     except Exception:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import uuid
 from datetime import datetime
 from typing import Annotated
@@ -41,6 +42,7 @@ router = APIRouter(prefix="/api/datasources", tags=["datasources"])
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 
+logger = logging.getLogger(__name__)
 _connection_manager = ConnectionManager()
 
 
@@ -65,6 +67,27 @@ def _get_encryption_key() -> str:
     if not settings.encryption_key:
         raise HTTPException(status_code=500, detail="ENCRYPTION_KEY is not configured")
     return settings.encryption_key
+
+
+def _humanize_error(e: Exception) -> str:
+    """Translate technical errors into user-readable messages."""
+    msg = str(e)
+    # Connection / config errors
+    if "unexpected keyword argument" in msg:
+        return f"数据库驱动配置错误: {msg}"
+    if "could not translate host name" in msg.lower() or "nodename nor servname" in msg.lower():
+        return "无法解析数据库主机名，请检查主机地址"
+    if "Connection refused" in msg or "connection refused" in msg.lower():
+        return "数据库拒绝连接，请检查主机和端口是否正确"
+    if "password authentication failed" in msg.lower():
+        return "数据库密码错误"
+    if "timeout" in msg.lower():
+        return "数据库连接超时，请检查网络或防火墙"
+    if "does not exist" in msg.lower() and "database" in msg.lower():
+        return "数据库不存在，请检查数据库名"
+    if "Incorrect padding" in msg or "not valid base64" in msg:
+        return "加密密钥配置无效，请运行 python -c \"from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\" 生成新密钥"
+    return msg
 
 
 async def _get_ds_or_404(ds_id: uuid.UUID, session: AsyncSession) -> DataSource:
@@ -262,6 +285,27 @@ async def _run_metadata_extraction(datasource_id: uuid.UUID, ds_config: dict) ->
                     extractor = PgMetadataExtractor(conn)
                 data = await extractor.extract(ds_config.get("schema_whitelist"))
 
+            logger.info(
+                "Extraction result: %d tables, %d columns, %d indexes, %d fks",
+                len(data.get("tables", [])),
+                len(data.get("columns", [])),
+                len(data.get("indexes", [])),
+                len(data.get("foreign_keys", [])),
+            )
+            if data.get("tables"):
+                sample = data["tables"][0]
+                logger.info("Sample table: schema=%s name=%s", sample.get("table_schema"), sample.get("table_name"))
+            if data.get("columns"):
+                sample = data["columns"][0]
+                logger.info("Sample column: schema=%s table=%s name=%s",
+                            sample.get("table_schema"), sample.get("table_name"), sample.get("column_name"))
+            elif data.get("tables"):
+                logger.warning(
+                    "Tables found but ZERO columns! First table: schema=%s name=%s",
+                    data["tables"][0].get("table_schema"),
+                    data["tables"][0].get("table_name"),
+                )
+
             tables_count = 0
             columns_count = 0
             for t_data in data["tables"]:
@@ -308,14 +352,20 @@ async def _run_metadata_extraction(datasource_id: uuid.UUID, ds_config: dict) ->
             # Auto-trigger learning after successful extraction
             asyncio.create_task(_run_learning_auto(datasource_id))
         except Exception as e:
-            result = await session.execute(select(MetadataSyncLog).where(MetadataSyncLog.id == sync_log_id))
-            log = result.scalar_one_or_none()
-            if log is not None:
-                log.status = "failed"
-                log.finished_at = datetime.now()
-                log.error_message = str(e)
-            with contextlib.suppress(Exception):
-                await session.commit()
+            error_msg = f"[后端] {_humanize_error(e)}"
+            try:
+                result = await session.execute(
+                    select(MetadataSyncLog).where(MetadataSyncLog.id == sync_log_id)
+                )
+                log = result.scalar_one_or_none()
+                if log is not None:
+                    log.status = "failed"
+                    log.finished_at = datetime.now()
+                    log.error_message = error_msg
+                    await session.commit()
+            except Exception:
+                pass  # best-effort: at minimum the error is logged to stderr
+            logger.exception("Metadata extraction failed for datasource %s", datasource_id)
         finally:
             _connection_manager.dispose_sync(ds_config["id"])
 
@@ -447,8 +497,17 @@ async def _run_sync(
                 extractor = Ex(conn)
                 current = await extractor.extract(ds_config.get("schema_whitelist"))
 
+            logger.info(
+                "Sync extraction: %d tables, %d columns, %d indexes, %d fks",
+                len(current.get("tables", [])),
+                len(current.get("columns", [])),
+                len(current.get("indexes", [])),
+                len(current.get("foreign_keys", [])),
+            )
+
             # Build stored metadata from DB
             stored_tables = await _build_stored_metadata(datasource_id, session)
+            logger.info("Stored metadata: %d tables, %d columns", len(stored_tables.get("tables", [])), len(stored_tables.get("columns", [])))
 
             # Filter current data if table_scope specified
             if table_scope:
@@ -463,8 +522,12 @@ async def _run_sync(
                 }
 
             changes = compute_diff(current, stored_tables)
-
-            # Record change logs and apply changes
+            logger.info(
+                "Diff: %d changes (%d table_added, %d column_added)",
+                len(changes),
+                sum(1 for c in changes if c["change_type"] == "table_added"),
+                sum(1 for c in changes if c["change_type"] == "column_added"),
+            )
             for ch in changes:
                 session.add(
                     MetadataChangeLog(
@@ -501,14 +564,20 @@ async def _run_sync(
                 log.columns_changed = cols_changed
             await session.commit()
         except Exception as e:
-            result = await session.execute(select(MetadataSyncLog).where(MetadataSyncLog.id == sync_log_id))
-            log = result.scalar_one_or_none()
-            if log is not None:
-                log.status = "failed"
-                log.finished_at = datetime.now()
-                log.error_message = str(e)
-            with contextlib.suppress(Exception):
-                await session.commit()
+            error_msg = f"[后端] {_humanize_error(e)}"
+            try:
+                result = await session.execute(
+                    select(MetadataSyncLog).where(MetadataSyncLog.id == sync_log_id)
+                )
+                log = result.scalar_one_or_none()
+                if log is not None:
+                    log.status = "failed"
+                    log.finished_at = datetime.now()
+                    log.error_message = error_msg
+                    await session.commit()
+            except Exception:
+                pass
+            logger.exception("Manual sync failed for datasource %s", datasource_id)
         finally:
             _connection_manager.dispose_sync(ds_config["id"])
 
@@ -635,17 +704,32 @@ async def _build_stored_metadata(datasource_id: uuid.UUID, session) -> dict:
 
 
 async def _apply_changes(session, changes: list[dict], datasource_id: uuid.UUID) -> None:
-    """Apply diff changes to metadata tables."""
+    """Apply diff changes to metadata tables, columns, indexes, and FKs."""
+
+    # Pass 1: apply table changes & build schema/name → id map
+    table_map: dict[tuple[str, str], uuid.UUID] = {}
+
+    # Pre-load existing tables for lookup
+    existing = await session.execute(
+        select(MetadataTable).where(MetadataTable.data_source_id == datasource_id)
+    )
+    for t in existing.scalars().all():
+        table_map[(t.schema_name, t.table_name)] = t.id
+
     for ch in changes:
         if ch["change_type"] == "table_added":
+            tid = uuid.uuid4()
             session.add(
                 MetadataTable(
-                    id=uuid.uuid4(),
+                    id=tid,
                     data_source_id=datasource_id,
                     schema_name=ch["schema_name"],
                     table_name=ch["table_name"],
+                    table_type=ch.get("after_value", {}).get("table_type", "BASE TABLE") if isinstance(ch.get("after_value"), dict) else "BASE TABLE",
+                    table_comment=(ch.get("after_value") or {}).get("table_comment") if isinstance(ch.get("after_value"), dict) else None,
                 )
             )
+            table_map[(ch["schema_name"], ch["table_name"])] = tid
         elif ch["change_type"] == "table_removed":
             result = await session.execute(
                 select(MetadataTable).where(
@@ -656,7 +740,61 @@ async def _apply_changes(session, changes: list[dict], datasource_id: uuid.UUID)
             )
             table = result.scalar_one_or_none()
             if table is not None:
+                table_map.pop((ch["schema_name"], ch["table_name"]), None)
                 await session.delete(table)
+
+    await session.flush()  # ensure table IDs are available for column FK
+
+    # Pass 2: apply column, index, FK changes
+    for ch in changes:
+        table_key = (ch["schema_name"], ch["table_name"])
+        tid = table_map.get(table_key)
+        if tid is None:
+            continue
+
+        ctype = ch["change_type"]
+        if ctype == "column_added":
+            cv = ch.get("after_value") or {}
+            session.add(
+                MetadataColumn(
+                    id=uuid.uuid4(),
+                    table_id=tid,
+                    column_name=ch["object_name"],
+                    data_type=cv.get("data_type", ""),
+                    is_nullable=cv.get("is_nullable", "YES") == "YES",
+                    default_value=cv.get("column_default"),
+                    column_comment=cv.get("column_comment"),
+                    is_primary_key=cv.get("is_primary_key", False),
+                    ordinal_position=cv.get("ordinal_position", 0),
+                )
+            )
+        elif ctype == "column_removed":
+            result = await session.execute(
+                select(MetadataColumn).where(
+                    MetadataColumn.table_id == tid,
+                    MetadataColumn.column_name == ch["object_name"],
+                )
+            )
+            col = result.scalar_one_or_none()
+            if col is not None:
+                await session.delete(col)
+        elif ctype == "column_modified":
+            result = await session.execute(
+                select(MetadataColumn).where(
+                    MetadataColumn.table_id == tid,
+                    MetadataColumn.column_name == ch["object_name"],
+                )
+            )
+            col = result.scalar_one_or_none()
+            if col is not None:
+                nv = ch.get("after_value") or {}
+                if "data_type" in nv:
+                    col.data_type = nv["data_type"]
+                if "is_nullable" in nv:
+                    col.is_nullable = nv["is_nullable"] == "YES"
+                if "column_comment" in nv:
+                    col.column_comment = nv["column_comment"]
+
     await session.commit()
 
 
@@ -682,8 +820,10 @@ async def _run_learning_auto(datasource_id: uuid.UUID) -> None:
         if running_sync.scalar_one_or_none() is not None:
             return
 
-        with contextlib.suppress(Exception):
+        try:
             await run_learning(session, datasource_id, trigger_type="auto")
+        except Exception:
+            logger.exception("Auto-learning failed for datasource %s", datasource_id)
 
 
 @router.post("/{ds_id}/learn", status_code=202)
@@ -706,7 +846,10 @@ async def trigger_learn(ds_id: uuid.UUID, session: SessionDep) -> LearnResponse:
     # (L0 only, no background task needed since it's fast)
     from learning.orchestrator import run_learning
 
-    learning_log_id = await run_learning(session, ds_id, trigger_type="manual")
+    try:
+        learning_log_id = await run_learning(session, ds_id, trigger_type="manual")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"[后端] {_humanize_error(e)}")
 
     return LearnResponse(
         learning_log_id=learning_log_id,
@@ -724,3 +867,31 @@ async def get_learning_logs(ds_id: uuid.UUID, session: SessionDep) -> list[Learn
     )
     logs = result.scalars().all()
     return [LearningLogResponse.model_validate(log) for log in logs]
+
+
+# ── Knowledge-base refresh ────────────────────────────────────────
+
+
+@router.post("/{ds_id}/refresh-knowledge", status_code=202)
+async def refresh_knowledge(ds_id: uuid.UUID, session: SessionDep) -> dict:
+    """Rebuild vector index + graph for a data source without re-running learning."""
+    await _get_ds_or_404(ds_id, session)
+
+    # Run synchronously so the caller sees success/failure immediately
+    from knowledge.embedding import EmbeddingClient
+    from knowledge.graph_store import GraphStore
+    from knowledge.lifecycle import refresh_knowledge_base
+    from knowledge.vector_store import VectorStore
+
+    try:
+        await refresh_knowledge_base(
+            session,
+            ds_id,
+            vector_store=VectorStore(),
+            graph_store=GraphStore(),
+            embedding_client=EmbeddingClient(),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"[后端] 知识库刷新失败: {_humanize_error(e)}")
+
+    return {"message": "Knowledge base refreshed"}

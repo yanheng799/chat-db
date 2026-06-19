@@ -11,6 +11,9 @@ _BLACKLIST = re.compile(
     r"(?i)\b(INSERT|UPDATE|DELETE|DROP|TRUNCATE|ALTER|EXEC|INTO\s+OUTFILE|LOAD\s+DATA|SLEEP|BENCHMARK|@@)\b"
 )
 _WHITELIST_LIMIT = 1000
+_MAX_JOINS = 4
+_SUBQUERY_PATTERN = re.compile(r"(?i)\(\s*SELECT\b")
+_UNION_CTE_PATTERN = re.compile(r"(?i)\bUNION\b|\bWITH\b\s+(?:\w+\s+)?AS\s*\(")
 
 
 def validate_sql(sql: str) -> dict:
@@ -42,10 +45,17 @@ def validate_sql(sql: str) -> dict:
     except Exception:
         return {"passed": False, "reason": "syntax: parse error"}
 
-    # Single-step constraint: block multi-table FROM
-    tables = re.findall(r"(?i)\bJOIN\b", sql)
-    from_count = len(re.findall(r"(?i)\bFROM\b", sql))
-    if tables or from_count > 1:
-        return {"passed": False, "reason": "single_step: multi-table query blocked (V1 only supports single-table queries)"}
+    # Multi-table: allow up to _MAX_JOINS JOIN keywords
+    join_count = len(re.findall(r"(?i)\bJOIN\b", sql))
+    if join_count > _MAX_JOINS:
+        return {"passed": False, "reason": f"multi-table: exceeds JOIN limit (max {_MAX_JOINS}, got {join_count})"}
+
+    # No subqueries (parenthesised SELECT)
+    if _SUBQUERY_PATTERN.search(sql):
+        return {"passed": False, "reason": "multi-table: subqueries are not allowed"}
+
+    # No UNION / CTE
+    if _UNION_CTE_PATTERN.search(sql):
+        return {"passed": False, "reason": "multi-table: UNION and CTE are not allowed"}
 
     return {"passed": True}

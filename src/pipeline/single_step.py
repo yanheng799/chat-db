@@ -92,46 +92,93 @@ async def run_single_step(
     except Exception:
         pass
 
-    # 5. Audit gate: return need_confirm items to user
-    if need_confirm_list:
-        return {"result": None, "need_confirm_items": need_confirm_list}
+    # 5. Try SQL generation (even if confirmation needed — show proposed SQL)
+    sql = None
+    if llm_caller is not None:
+        try:
+            # Query graph for JOIN paths between matched tables
+            join_paths = None
+            if len({m.get("table", "") for m in matches if m.get("table")}) > 1:
+                try:
+                    from knowledge.graph_query import shortest_join_path
+                    from knowledge.graph_store import GraphStore
+                    tables = list({m["table"] for m in matches if m.get("table")})
+                    graph = GraphStore()
+                    try:
+                        paths = []
+                        for i in range(len(tables)):
+                            for j in range(i + 1, len(tables)):
+                                path = await shortest_join_path(graph, data_source_id, tables[i], tables[j],
+                                                                min_confidence=0.5)
+                                if path:
+                                    for step in path:
+                                        if step not in paths:
+                                            paths.append(step)
+                        if paths:
+                            join_paths = paths
+                    finally:
+                        graph.close()
+                except Exception:
+                    pass
 
-    # 6. SQL generation
+            from sql.generator import generate_sql
+            sql = await generate_sql(nl_text, matches, norm_values, schema_desc,
+                                     llm_caller=_llm_call, join_paths=join_paths)
+        except RuntimeError:
+            sql = None
+        except Exception:
+            sql = None
+
+        if sql:
+            try:
+                from sql.security import validate_sql
+                sec = validate_sql(sql)
+                if not sec["passed"]:
+                    retry_sql = None
+                    try:
+                        retry_sql = await generate_sql(
+                            nl_text + f" [安全检查失败: {sec['reason']}]", matches, norm_values,
+                            schema_desc, llm_caller=_llm_call, join_paths=join_paths,
+                        )
+                    except Exception:
+                        pass
+                    if retry_sql:
+                        try:
+                            if validate_sql(retry_sql)["passed"]:
+                                sql = retry_sql
+                            else:
+                                return {"error": f"SQL security check failed: {sec['reason']}", "sql": sql}
+                        except Exception:
+                            return {"error": f"SQL security check failed: {sec['reason']}", "sql": sql}
+                    else:
+                        return {"error": f"SQL security check failed: {sec['reason']}", "sql": sql}
+            except Exception:
+                pass
+
+    # 5b. Audit gate: only block execution if we CANNOT generate SQL
+    # If SQL is ready and passes security, continue — show confirm items as warnings
+    if need_confirm_list and not sql:
+        return {"result": None, "sql": None, "need_confirm_items": need_confirm_list}
+
+    # 6. Fallback: no SQL generated
+    if not sql:
+        return {"error": "SQL generation failed."}
     if llm_caller is None:
         return {"error": "LLM caller required for SQL generation"}
-    try:
-        from sql.generator import generate_sql
-        sql = await generate_sql(nl_text, matches, norm_values, schema_desc, llm_caller=_llm_call)
-    except RuntimeError:  # LLM limit
-        return {"error": "LLM call limit reached — cannot generate SQL.", "need_confirm_items": []}
-    if sql is None:
-        return {"error": "SQL generation failed."}
 
-    # 7. Security validation
-    from sql.security import validate_sql
-    sec = validate_sql(sql)
-    if not sec["passed"]:
+    # 7. Execution
+    if query_executor is not None:
+        # Use target datasource connection
+        exec_result = await query_executor(sql)
+    elif session is not None:
+        # Fallback: use app DB session (for backward compat)
         try:
-            from sql.generator import generate_sql
-            retry_sql = await generate_sql(
-                nl_text + f" [安全检查失败: {sec['reason']}]", matches, norm_values,
-                schema_desc, llm_caller=_llm_call,
-            )
-            if retry_sql and validate_sql(retry_sql)["passed"]:
-                sql = retry_sql
-            else:
-                return {"error": f"SQL security check failed: {sec['reason']}"}
-        except RuntimeError:
-            return {"error": f"SQL security check failed: {sec['reason']} (LLM retry limit)"}
-
-    # 8. Execution
-    if query_executor is None:
+            from sql.executor import execute_sql
+            exec_result = await execute_sql(session, sql)
+        except Exception as e:
+            return {"error": f"SQL execution failed: {e}", "sql": sql}
+    else:
         return {"sql": sql, "result": "(dry-run: no executor)"}
-    try:
-        from sql.executor import execute_sql
-        exec_result = await execute_sql(session, sql)
-    except Exception as e:
-        return {"error": f"SQL execution failed: {e}", "sql": sql}
 
     if "error" in exec_result:
         return {"error": exec_result["error"], "sql": sql}
@@ -151,7 +198,7 @@ async def run_single_step(
         "result": result_data,
         "summary": summary_text or f"Returned {len(result_data['rows'])} row(s).",
         "sql": sql,
-        "need_confirm_items": [],
+        "need_confirm_items": need_confirm_list,
     }
 
 

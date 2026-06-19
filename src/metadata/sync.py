@@ -58,8 +58,9 @@ def compute_diff(current: dict, stored: dict) -> list[dict]:
 
     for key, cc in current_cols.items():
         if key not in stored_cols:
-            # Only report column_added if the table wasn't already added
-            if (key[0], key[1]) in stored_tables:
+            # Report column_added if the parent table exists in EITHER
+            # stored (existing table, new column) OR current (new table, all columns)
+            if (key[0], key[1]) in stored_tables or (key[0], key[1]) in current_tables:
                 changes.append(
                     {
                         "change_type": "column_added",
@@ -107,7 +108,7 @@ def compute_diff(current: dict, stored: dict) -> list[dict]:
     stored_idx = {(i["table_schema"], i["table_name"], i["index_name"]): i for i in stored["indexes"]}
 
     for key, ci in current_idx.items():
-        if key not in stored_idx and (key[0], key[1]) in stored_tables:
+        if key not in stored_idx and ((key[0], key[1]) in stored_tables or (key[0], key[1]) in current_tables):
             changes.append(
                 {
                     "change_type": "index_added",
@@ -136,7 +137,7 @@ def compute_diff(current: dict, stored: dict) -> list[dict]:
     stored_fks = {(f["table_schema"], f["table_name"], f["constraint_name"]): f for f in stored["foreign_keys"]}
 
     for key, cf in current_fks.items():
-        if key not in stored_fks and (key[0], key[1]) in stored_tables:
+        if key not in stored_fks and ((key[0], key[1]) in stored_tables or (key[0], key[1]) in current_tables):
             changes.append(
                 {
                     "change_type": "fk_added",

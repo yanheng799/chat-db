@@ -64,8 +64,10 @@ async def normalize_enum(
         if llm_result is not None:
             return llm_result
 
+    # Only flag as need_confirm if there are known enum candidates to disambiguate
+    need_confirm = len(candidates) > 0
     return NormalizedValue(
-        original=raw_value, value_type="enum", need_confirm=True
+        original=raw_value, value_type="enum", need_confirm=need_confirm
     )
 
 

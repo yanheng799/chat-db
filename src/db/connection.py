@@ -16,8 +16,10 @@ class ConnectionManager:
                 f":{config['port']}/{config['database']}"
             )
             connect_args = {
-                "statement_timeout": "30000",
-                "server_settings": {"default_transaction_read_only": "on"},
+                "server_settings": {
+                    "statement_timeout": "30000",
+                    "default_transaction_read_only": "on",
+                },
             }
         else:
             url = (

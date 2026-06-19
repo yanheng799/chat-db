@@ -25,19 +25,33 @@ async def execute_sql(
     """
     start = time.monotonic()
     try:
+        from datetime import date as _date, datetime as _dt
         # SET TRANSACTION READ ONLY must have been applied by the connection layer.
         result = await session.execute(text(sql).execution_options(timeout=timeout_s))
-        rows = result.fetchall()
+        rows_raw = result.fetchall()
         columns = list(result.keys())
+        # Convert datetime/date to ISO strings
+        rows = []
+        for row in rows_raw:
+            clean = tuple(
+                v.isoformat() if isinstance(v, (_dt, _date)) else v
+                for v in row
+            )
+            rows.append(clean)
         elapsed = int((time.monotonic() - start) * 1000)
         return {
             "columns": columns,
-            "rows": [tuple(r) for r in rows],
+            "rows": rows,
             "execution_time_ms": elapsed,
         }
     except Exception as e:
         elapsed = int((time.monotonic() - start) * 1000)
         logger.warning("SQL execute failed (%dms): %s | SQL: %s", elapsed, e, sql[:200])
+        # Rollback to recover session from failed transaction
+        try:
+            await session.rollback()
+        except Exception:
+            pass
         return {
             "error": str(e),
             "original_sql": sql,

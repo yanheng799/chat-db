@@ -295,12 +295,20 @@ async def run_learning(
         # Determine status (avoid division by zero for empty data sources).
         if total_columns == 0:
             status = "failed"
+            error_msg = (
+                "没有元数据列（metadata_columns 为空）。"
+                "请先执行「同步元数据」扫描数据库表结构，同步完成后再运行学习。"
+            )
         elif columns_described / total_columns >= 0.8:
             status = "success"
         elif columns_described > 0:
             status = "partial_success"
         else:
             status = "failed"
+            error_msg = (
+                f"未能为任何列生成语义描述 (L0={l0_count}, L1={l1_count}, L2={l2_count})。"
+                f"数据库注释可能为空，或字段名为非中英文组合 (如 a1,b2)。"
+            )
 
         learning_log.status = status
         learning_log.finished_at = datetime.now()
@@ -310,6 +318,8 @@ async def run_learning(
         learning_log.l1_count = l1_count
         learning_log.l2_count = l2_count
         learning_log.l2_llm_calls = l2_llm_calls
+        if status == "failed":
+            learning_log.error_message = f"[后端] {error_msg}"
         await session.commit()
 
         # Knowledge base refresh (Phase 3): non-fatal, independent of learning status.
@@ -323,8 +333,9 @@ async def run_learning(
     except Exception as e:
         learning_log.status = "failed"
         learning_log.finished_at = datetime.now()
-        learning_log.error_message = str(e)
+        learning_log.error_message = f"[后端] {str(e)}"
         await session.commit()
+        logger.exception("Learning pipeline failed for datasource %s", data_source_id)
 
     return learning_log_id
 
