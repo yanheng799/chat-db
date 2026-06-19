@@ -316,6 +316,10 @@ async def run_learning(
         with contextlib.suppress(Exception):
             await _refresh_knowledge_with_ds(session, data_source_id)
 
+        # Enum alias seed collection (Phase 4): auto-populate from L1 detected_enum_values.
+        with contextlib.suppress(Exception):
+            await _collect_enum_seeds(session, data_source_id)
+
     except Exception as e:
         learning_log.status = "failed"
         learning_log.finished_at = datetime.now()
@@ -613,3 +617,13 @@ async def _refresh_knowledge_with_ds(
         graph_store=GraphStore(),
         embedding_client=EmbeddingClient(),
     )
+
+
+async def _collect_enum_seeds(
+    session: AsyncSession,
+    data_source_id: uuid.UUID,
+) -> None:
+    """Auto-collect enum alias seeds from L1 detected_enum_values (Phase 4)."""
+    from normalizer.mapping_service import auto_collect_enum_seeds
+
+    await auto_collect_enum_seeds(session, data_source_id)
