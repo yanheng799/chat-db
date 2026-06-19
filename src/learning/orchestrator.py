@@ -14,8 +14,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from learning.l2_inference import (
+    FieldSignal,
     LLMCaller,
-    build_sample_query,
     call_llm_with_retry,
 )
 from learning.pattern_detector import (
@@ -215,10 +215,14 @@ async def run_learning(
     data_source_id: uuid.UUID,
     trigger_type: str = "auto",
 ) -> uuid.UUID:
-    """Run the full learning pipeline (L0 → L1 placeholder → L2 placeholder).
+    """Run the full learning pipeline (L0 → L1 → L2).
 
-    Creates a learning log entry and runs L0.
-    L1 and L2 are placeholders for now (Issues 002 and 003).
+    L0 copies schema comments into ``semantic_description``. L1 does field-name
+    splitting (writes ``semantic_description``), data-pattern detection (writes
+    structural stats only), and value-overlap foreign-key inference (writes
+    ``metadata_inferred_fks``). L2 does LLM semantic inference. Coverage is
+    computed from non-null ``semantic_description`` columns. Each stage's
+    failure is suppressed so it does not block the rest of the pipeline.
     """
     learning_log_id = uuid.uuid4()
     learning_log = MetadataLearningLog(
@@ -252,13 +256,20 @@ async def run_learning(
         # L1: field name splitting
         l1_split_count = await run_l1_splitting(session, data_source_id)
 
-        # L1: pattern detection (requires data source connection)
-        l1_pattern_count = 0
+        # L1: pattern detection writes structural stats (enum/null_ratio/
+        # numeric_range) to columns; it does NOT write semantic_description
+        # and must not count toward coverage. Failure is suppressed.
         with contextlib.suppress(Exception):
-            # Pattern detection failure should not block the pipeline
-            l1_pattern_count = await _run_pattern_detection_with_ds(session, data_source_id)
+            await _run_pattern_detection_with_ds(session, data_source_id)
 
-        l1_count = l1_split_count + l1_pattern_count
+        # L1: value-overlap FK inference (writes metadata_inferred_fks,
+        # recompute-replace). Does not affect semantic coverage. Suppressed.
+        with contextlib.suppress(Exception):
+            await _run_fk_inference_with_ds(session, data_source_id)
+
+        # l1_count = splitting only (the only L1 step that writes
+        # semantic_description). Pattern detection is intentionally excluded.
+        l1_count = l1_split_count
 
         # L2: LLM semantic inference
         l2_count = 0
@@ -268,10 +279,23 @@ async def run_learning(
             l2_count = l2_result[0]
             l2_llm_calls = l2_result[1]
 
-        columns_described = l0_count + l1_count + l2_count
+        # Coverage = columns with a non-null semantic_description, counted
+        # directly from the DB. This fixes the prior bug where pattern
+        # detection (writing null_ratio to ~every column) inflated the count
+        # via l0+l1+l2 summation, pushing the ratio to ~100% or beyond.
+        from sqlalchemy import func
 
-        # Determine status
-        if total_columns == 0 or columns_described / total_columns >= 0.8:
+        covered_result = await session.execute(
+            select(func.count())
+            .where(MetadataColumn.table_id.in_(table_ids))
+            .where(MetadataColumn.semantic_description.is_not(None))
+        )
+        columns_described = covered_result.scalar() or 0
+
+        # Determine status (avoid division by zero for empty data sources).
+        if total_columns == 0:
+            status = "failed"
+        elif columns_described / total_columns >= 0.8:
             status = "success"
         elif columns_described > 0:
             status = "partial_success"
@@ -348,119 +372,13 @@ async def _run_pattern_detection_with_ds(
         await engine.dispose()
 
 
-async def run_l2_inference(
+async def _run_fk_inference_with_ds(
     session: AsyncSession,
     data_source_id: uuid.UUID,
-    *,
-    query_executor: QueryExecutor,
-    llm_caller: LLMCaller,
-    engine_type: str = "postgresql",
-    max_concurrency: int | None = None,
-    timeout_minutes: int | None = None,
-) -> tuple[int, int]:
-    """Run L2 LLM inference for tables with uncovered fields.
+) -> int:
+    """Look up the DataSource, create a connection, and run FK inference.
 
-    Returns ``(l2_count, l2_llm_calls)`` — the number of newly described
-    columns and the total LLM API calls made.
-    """
-    from datetime import datetime as _dt
-
-    from config.settings import Settings
-
-    # Use provided values or fall back to Settings defaults
-    if max_concurrency is None or timeout_minutes is None:
-        settings = Settings()
-        if max_concurrency is None:
-            max_concurrency = settings.learning_l2_max_concurrency
-        if timeout_minutes is None:
-            timeout_minutes = settings.learning_job_timeout_minutes
-
-    tables_result = await session.execute(select(MetadataTable).where(MetadataTable.data_source_id == data_source_id))
-    tables = tables_result.scalars().all()
-
-    l2_count = 0
-    l2_llm_calls = 0
-    semaphore = asyncio.Semaphore(max_concurrency)
-    start_time = _dt.now()
-    timeout_seconds = timeout_minutes * 60
-
-    async def _process_table(table: MetadataTable) -> tuple[int, int]:
-        """Process a single table: sample → LLM → write results."""
-        async with semaphore:
-            # Check timeout
-            elapsed = (_dt.now() - start_time).total_seconds()
-            if elapsed >= timeout_seconds:
-                return 0, 0
-
-            # Get columns for this table
-            cols_result = await session.execute(select(MetadataColumn).where(MetadataColumn.table_id == table.id))
-            columns = cols_result.scalars().all()
-
-            # Filter to only uncovered columns
-            uncovered = [c for c in columns if c.semantic_description is None]
-            if not uncovered:
-                return 0, 0
-
-            field_names = [c.column_name for c in uncovered]
-
-            # Build and execute sample query
-            sample_sql = build_sample_query(table.table_name, table.schema_name, uncovered, engine_type)
-            sample_rows: list[dict[str, Any]] = []
-            if sample_sql:
-                try:
-                    rows = await query_executor(sample_sql)
-                    # query_executor may return a single dict or list of dicts
-                    if isinstance(rows, list):
-                        sample_rows = rows
-                    elif isinstance(rows, dict):
-                        sample_rows = [rows]
-                except Exception:
-                    sample_rows = []
-
-            # Call LLM with retry
-            result = await call_llm_with_retry(llm_caller, table.table_name, field_names, sample_rows)
-            llm_calls = 1
-
-            if result is None:
-                return 0, llm_calls
-
-            # Write results
-            described = 0
-            col_by_name = {c.column_name: c for c in uncovered}
-            for field_name, description in result.items():
-                if not description or not isinstance(description, str):
-                    continue
-                col = col_by_name.get(field_name)
-                if col is not None and col.semantic_description is None:
-                    col.semantic_description = description
-                    col.description_source = "llm_inference"
-                    col.description_confidence = 0.5
-                    described += 1
-
-            return described, llm_calls
-
-    # Process all tables concurrently with semaphore
-    tasks = [_process_table(table) for table in tables]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-
-    for r in results:
-        if isinstance(r, Exception):
-            logger.error("L2 table processing error: %s", r)
-            continue
-        l2_count += r[0]
-        l2_llm_calls += r[1]
-
-    await session.commit()
-    return l2_count, l2_llm_calls
-
-
-async def _run_l2_with_ds(
-    session: AsyncSession,
-    data_source_id: uuid.UUID,
-) -> tuple[int, int]:
-    """Look up the DataSource, create connections, and run L2 inference.
-
-    Returns ``(0, 0)`` if the DataSource is not found or setup fails.
+    Returns 0 if the DataSource is not found, inactive, or connection fails.
     """
     from sqlalchemy import text
 
@@ -468,12 +386,12 @@ async def _run_l2_with_ds(
     from config.encryption import decrypt_value
     from config.settings import Settings
     from db.connection import ConnectionManager
-    from llm.client import create_llm_caller
+    from learning.fk_inference import run_fk_inference
 
     ds_result = await session.execute(select(DataSource).where(DataSource.id == data_source_id))
     ds = ds_result.scalar_one_or_none()
     if ds is None or not ds.is_active:
-        return 0, 0
+        return 0
 
     settings = Settings()
     password = decrypt_value(ds.password_encrypted, settings.encryption_key)
@@ -492,20 +410,178 @@ async def _run_l2_with_ds(
     async def query_executor(sql: str) -> Any:
         async with engine.connect() as conn:
             result = await conn.execute(text(sql))
-            rows = result.mappings().all()
-            if len(rows) == 1:
-                return dict(rows[0])
-            return [dict(r) for r in rows]
-
-    llm_caller = create_llm_caller(settings)
+            # Row-count estimate queries return a single aggregate row; distinct
+            # value queries return a list of scalars.
+            upper = sql.lstrip().upper()
+            if upper.startswith("EXPLAIN") or upper.startswith("SELECT C.RELTUPLES"):
+                return dict(result.mappings().one())
+            return result.scalars().all()
 
     try:
-        return await run_l2_inference(
+        return await run_fk_inference(
             session,
             data_source_id,
             query_executor=query_executor,
-            llm_caller=llm_caller,
             engine_type=ds.engine,
         )
     finally:
         await engine.dispose()
+
+
+async def run_l2_inference(
+    session_factory: Callable[[], AsyncSession],
+    data_source_id: uuid.UUID,
+    *,
+    llm_caller: LLMCaller,
+    max_concurrency: int | None = None,
+    timeout_minutes: int | None = None,
+    max_calls: int | None = None,
+) -> tuple[int, int]:
+    """Run L2 LLM inference for tables with uncovered fields.
+
+    Each concurrent task opens its own :class:`AsyncSession` from
+    *session_factory* — ``AsyncSession`` is not safe for concurrent use across
+    tasks, so a session is never shared by more than one task.
+
+    L2 infers descriptions from **structured signals only** (field name, data
+    type, L1 enum values, L0 comment, splitting result). No raw business-data
+    rows are sent to the LLM.
+
+    Returns ``(l2_count, l2_llm_calls)`` — the number of newly described
+    columns and the total LLM API calls made.
+    """
+    from datetime import datetime as _dt
+
+    from config.settings import Settings
+
+    if max_concurrency is None or timeout_minutes is None or max_calls is None:
+        settings = Settings()
+        if max_concurrency is None:
+            max_concurrency = settings.learning_l2_max_concurrency
+        if timeout_minutes is None:
+            timeout_minutes = settings.learning_job_timeout_minutes
+        if max_calls is None:
+            max_calls = settings.learning_l2_max_calls
+
+    # Discover tables with a short-lived session; each is then processed in its own.
+    async with session_factory() as session:
+        tables_result = await session.execute(
+            select(MetadataTable).where(MetadataTable.data_source_id == data_source_id)
+        )
+        tables = tables_result.scalars().all()
+
+    l2_count = 0
+    l2_llm_calls = 0
+    semaphore = asyncio.Semaphore(max_concurrency)
+    start_time = _dt.now()
+    timeout_seconds = timeout_minutes * 60
+    # Shared call counter. asyncio is single-threaded, so the cap check and the
+    # increment below run without an await between them → atomic w.r.t. other tasks.
+    counter = {"calls": 0}
+
+    async def _process_table(table: MetadataTable) -> tuple[int, int]:
+        """Process a single table: build structured signals → LLM → write."""
+        async with semaphore:
+            # Overall timeout guard
+            elapsed = (_dt.now() - start_time).total_seconds()
+            if elapsed >= timeout_seconds:
+                return 0, 0
+
+            async with session_factory() as session:
+                cols_result = await session.execute(select(MetadataColumn).where(MetadataColumn.table_id == table.id))
+                columns = cols_result.scalars().all()
+
+                uncovered = [c for c in columns if c.semantic_description is None]
+                if not uncovered:
+                    return 0, 0
+
+                # Cost cap: stop issuing new LLM calls once the limit is hit.
+                if max_calls and counter["calls"] >= max_calls:
+                    logger.info(
+                        "L2 reached max_calls=%d before table %s; skipping",
+                        max_calls,
+                        table.table_name,
+                    )
+                    return 0, 0
+                counter["calls"] += 1
+
+                signals = [
+                    FieldSignal(
+                        name=c.column_name,
+                        data_type=c.data_type,
+                        enum_values=c.detected_enum_values,
+                        comment=c.column_comment,
+                        split=split_field_name(c.column_name),
+                    )
+                    for c in uncovered
+                ]
+
+                result = await call_llm_with_retry(llm_caller, table.table_name, signals)
+
+                if result is None:
+                    return 0, 1
+
+                described = 0
+                col_by_name = {c.column_name: c for c in uncovered}
+                for field_name, description in result.items():
+                    if not description or not isinstance(description, str):
+                        continue
+                    col = col_by_name.get(field_name)
+                    if col is not None and col.semantic_description is None:
+                        col.semantic_description = description
+                        col.description_source = "llm_inference"
+                        col.description_confidence = 0.5
+                        described += 1
+
+                await session.commit()
+                return described, 1
+
+    tasks = [_process_table(table) for table in tables]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    for r in results:
+        if isinstance(r, Exception):
+            logger.error("L2 table processing error: %s", r)
+            continue
+        l2_count += r[0]
+        l2_llm_calls += r[1]
+
+    if max_calls and counter["calls"] >= max_calls:
+        logger.info(
+            "L2 stopped early after %d LLM calls (max_calls=%d)",
+            counter["calls"],
+            max_calls,
+        )
+
+    return l2_count, l2_llm_calls
+
+
+async def _run_l2_with_ds(
+    session: AsyncSession,
+    data_source_id: uuid.UUID,
+) -> tuple[int, int]:
+    """Verify the data source is active and run L2 inference.
+
+    L2 needs no access to the target (business) database — it works only from
+    already-extracted metadata. Returns ``(0, 0)`` if the data source is not
+    found or inactive.
+    """
+    from config.data_source_model import DataSource
+    from config.database import get_session_factory
+    from config.settings import Settings
+    from llm.client import create_llm_caller
+
+    ds_result = await session.execute(select(DataSource).where(DataSource.id == data_source_id))
+    ds = ds_result.scalar_one_or_none()
+    if ds is None or not ds.is_active:
+        return 0, 0
+
+    settings = Settings()
+    llm_caller = create_llm_caller(settings)
+    session_factory = get_session_factory()
+
+    return await run_l2_inference(
+        session_factory,
+        data_source_id,
+        llm_caller=llm_caller,
+    )

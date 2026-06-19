@@ -10,30 +10,48 @@ from config.settings import Settings
 
 
 @pytest.fixture()
-async def db_session() -> AsyncGenerator[AsyncSession, None]:
+async def engine():
     settings = Settings()
-    engine = create_async_engine(
+    eng = create_async_engine(
         f"postgresql+asyncpg://{settings.postgres_user}"
         f":{settings.postgres_password}"
         f"@{settings.postgres_host}"
         f":{settings.postgres_port}"
         f"/{settings.postgres_db}",
     )
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    yield eng
+    await eng.dispose()
+
+
+@pytest.fixture()
+async def session_factory(engine) -> AsyncGenerator[async_sessionmaker[AsyncSession], None]:
+    """Shared async session factory for tests that need independent sessions.
+
+    Code paths that open concurrent sessions (e.g. L2) must receive a factory
+    rather than a single shared ``AsyncSession``.
+    """
+    factory = async_sessionmaker(engine, expire_on_commit=False)
+    yield factory
+
+
+@pytest.fixture()
+async def db_session(session_factory) -> AsyncGenerator[AsyncSession, None]:
     async with session_factory() as session:
         # Clean tables in reverse FK order
+        from config.data_source_model import DataSource
         from metadata.models import (
             MetadataChangeLog,
             MetadataColumn,
             MetadataForeignKey,
             MetadataIndex,
+            MetadataInferredForeignKey,
             MetadataLearningLog,
             MetadataSyncLog,
             MetadataTable,
         )
-        from config.data_source_model import DataSource
 
         await session.execute(MetadataChangeLog.__table__.delete())
+        await session.execute(MetadataInferredForeignKey.__table__.delete())
         await session.execute(MetadataForeignKey.__table__.delete())
         await session.execute(MetadataIndex.__table__.delete())
         await session.execute(MetadataColumn.__table__.delete())
@@ -43,7 +61,6 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
         await session.execute(DataSource.__table__.delete())
         await session.commit()
         yield session
-    await engine.dispose()
 
 
 @pytest.fixture()

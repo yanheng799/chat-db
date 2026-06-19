@@ -1,4 +1,4 @@
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
@@ -17,6 +17,16 @@ _engine = create_async_engine(
 )
 
 _async_session_factory = async_sessionmaker(_engine, expire_on_commit=False)
+
+
+def get_session_factory() -> Callable[[], AsyncSession]:
+    """Return the shared async session factory.
+
+    Use this (instead of a single shared :class:`AsyncSession`) when a caller
+    needs to open independent sessions across concurrent tasks — SQLAlchemy
+    ``AsyncSession`` is not safe for concurrent use from multiple tasks.
+    """
+    return _async_session_factory
 
 
 async def get_session() -> AsyncGenerator[AsyncSession, None]:

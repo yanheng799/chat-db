@@ -26,6 +26,15 @@ class TestLearningSettings:
         settings = Settings()
         assert settings.learning_job_timeout_minutes == 120
 
+    def test_default_learning_l2_max_calls(self):
+        settings = Settings()
+        assert settings.learning_l2_max_calls == 200
+
+    def test_learning_l2_max_calls_from_env(self, monkeypatch):
+        monkeypatch.setenv("LEARNING_L2_MAX_CALLS", "0")
+        settings = Settings()
+        assert settings.learning_l2_max_calls == 0
+
 
 class TestLearningLogModel:
     """Verify MetadataLearningLog model fields and ENUM types."""

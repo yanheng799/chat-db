@@ -197,7 +197,7 @@ Phase 0 (脚手架)
 
 > 文档 §二 2.2 数据存储职责边界
 
-### 3.1 向量库（ChromaDB）
+### 3.1 向量库（Milvus）
 
 - Collection: `field_descriptions` — 字段语义描述向量化
 - Collection: `query_samples` — 查询样例向量化（热启动）
