@@ -31,11 +31,11 @@ class TestAdminGraph:
         assert "tables" in data and "columns" in data
 
     @pytest.mark.asyncio
-    async def test_graph_edges_returns_counts(self, client: AsyncClient):
+    async def test_graph_edges_returns_list(self, client: AsyncClient):
         r = await client.get("/api/admin/graph/edges/test-ds-id")
         assert r.status_code == 200
         data = r.json()
-        assert "CONTAINS" in data["edges"]
+        assert isinstance(data["edges"], list)
 
 
 class TestAdminMappings:

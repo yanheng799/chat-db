@@ -68,16 +68,24 @@ async def sync_logs(session: SessionDep, limit: int = Query(20, ge=1, le=200)):
 
 @router.post("/sync/trigger")
 async def sync_trigger(session: SessionDep):
-    ds_result = await session.execute(text("SELECT id FROM data_sources WHERE is_active = true LIMIT 1"))
+    from config.data_source_model import DataSource
+    ds_result = await session.execute(select(DataSource).where(DataSource.is_active.is_(True)).limit(1))
     active = ds_result.scalar_one_or_none()
     if active is None:
         raise HTTPException(status_code=400, detail="No active data source to sync.")
+    from config.encryption import decrypt_value
+    from config.settings import Settings
+    settings = Settings()
+    password = decrypt_value(active.password_encrypted, settings.encryption_key)
+    ds_config = {
+        "id": str(active.id), "engine": active.engine, "host": active.host,
+        "port": active.port, "username": active.username, "password": password,
+        "database": active.database, "schema_whitelist": active.schema_whitelist,
+    }
     import asyncio
     from api.datasources import _run_metadata_extraction
-
-    ds_id = active[0] if isinstance(active, tuple) else active
-    asyncio.create_task(_run_metadata_extraction(ds_id, {}))
-    return {"task_id": str(uuid.uuid4()), "status": "accepted", "data_source_id": str(ds_id)}
+    asyncio.create_task(_run_metadata_extraction(active.id, ds_config))
+    return {"task_id": str(uuid.uuid4()), "status": "accepted", "data_source_id": str(active.id)}
 
 
 # ── 10.2 Graph ────────────────────────────────────────────
@@ -86,11 +94,19 @@ async def sync_trigger(session: SessionDep):
 @router.get("/graph/nodes/{data_source_id}")
 async def graph_nodes(data_source_id: str):
     from knowledge.graph_store import GraphStore
-
     store = GraphStore()
     try:
-        tables = store.count_nodes(data_source_id, "Table")
-        columns = store.count_nodes(data_source_id, "Column")
+        nodes_data = store.query(
+            "MATCH (n {data_source_id: $ds}) RETURN labels(n) AS labels, n.name AS name, n.schema AS schema, n.table AS table, n.type AS type, n.is_pk AS is_pk",
+            ds=str(data_source_id),
+        )
+        tables, columns = [], []
+        for r in nodes_data:
+            lbls = r.get("labels", [])
+            if "Table" in lbls:
+                tables.append({"name": r.get("name"), "schema": r.get("schema")})
+            elif "Column" in lbls:
+                columns.append({"table": r.get("table"), "name": r.get("name"), "type": r.get("type"), "is_pk": r.get("is_pk")})
         return {"data_source_id": data_source_id, "tables": tables, "columns": columns}
     finally:
         store.close()
@@ -99,17 +115,17 @@ async def graph_nodes(data_source_id: str):
 @router.get("/graph/edges/{data_source_id}")
 async def graph_edges(data_source_id: str):
     from knowledge.graph_store import GraphStore
-
     store = GraphStore()
     try:
-        return {
-            "data_source_id": data_source_id,
-            "edges": {
-                "CONTAINS": store.count_edges(data_source_id, "CONTAINS"),
-                "REFERENCES": store.count_edges(data_source_id, "REFERENCES"),
-                "INFERRED_REF": store.count_edges(data_source_id, "INFERRED_REF"),
-            },
-        }
+        edges_data = store.query(
+            "MATCH (a {data_source_id: $ds})-[r]->(b {data_source_id: $ds}) WHERE type(r) IN ['REFERENCES','INFERRED_REF','CONTAINS'] "
+            "RETURN type(r) AS etype, a.name AS from_name, a.table AS from_table, b.name AS to_name, b.table AS to_table, r.confidence AS confidence",
+            ds=str(data_source_id),
+        )
+        edges = [{"type": r.get("etype"), "from_table": r.get("from_table"), "from_column": r.get("from_name"),
+                  "to_table": r.get("to_table"), "to_column": r.get("to_name"),
+                  "confidence": r.get("confidence")} for r in edges_data]
+        return {"data_source_id": data_source_id, "edges": edges}
     finally:
         store.close()
 
@@ -197,6 +213,32 @@ async def list_hotwords():
     return {"items": [{"term": k, **v} for k, v in HOT_WORDS.items()]}
 
 
+class HotWordCreate(BaseModel):
+    term: str
+    target_table: str
+    target_column: str | None = None
+    formula: str | None = None
+    locked: bool = False
+    description: str = ""
+
+
+@router.post("/hotwords")
+async def create_hotword(item: HotWordCreate):
+    from semantic.hot_words import HOT_WORDS
+    HOT_WORDS[item.term] = {"target_table": item.target_table,
+                            "target_column": item.target_column, "formula": item.formula,
+                            "locked": item.locked, "description": item.description}
+    return {"created": item.term}
+
+
+@router.delete("/hotwords/{term}")
+async def delete_hotword(term: str):
+    from semantic.hot_words import HOT_WORDS
+    if term in HOT_WORDS:
+        del HOT_WORDS[term]
+    return {"deleted": term}
+
+
 # ── 10.5 Fixed Periods ───────────────────────────────────
 
 
@@ -204,6 +246,27 @@ async def list_hotwords():
 async def list_fixed_periods():
     from normalizer.time_parser import FIXED_DATE_PERIODS
     return {"items": [{"name": k, "start": v[0], "end": v[1]} for k, v in FIXED_DATE_PERIODS.items()]}
+
+
+class PeriodCreate(BaseModel):
+    name: str
+    start_mmdd: str
+    end_mmdd: str
+
+
+@router.post("/fixed-periods")
+async def create_period(item: PeriodCreate):
+    from normalizer.time_parser import FIXED_DATE_PERIODS
+    FIXED_DATE_PERIODS[item.name] = (item.start_mmdd, item.end_mmdd)
+    return {"created": item.name}
+
+
+@router.delete("/fixed-periods/{name}")
+async def delete_period(name: str):
+    from normalizer.time_parser import FIXED_DATE_PERIODS
+    if name in FIXED_DATE_PERIODS:
+        del FIXED_DATE_PERIODS[name]
+    return {"deleted": name}
 
 
 # ── 10.6 Audit Policy ────────────────────────────────────
