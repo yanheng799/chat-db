@@ -13,7 +13,9 @@ IS NOT NULL``) so downstream semantic matching can do nearest-neighbour retrieva
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 import uuid
 from typing import Any
 
@@ -234,8 +236,33 @@ async def search_fields(
     embedding_client: EmbeddingClient,
     vector_store: VectorStore,
     top_k: int = 10,
+    timeout: float = 15.0,
 ) -> list[dict[str, Any]]:
-    """Nearest-neighbour search for a natural-language query, scoped to a data source."""
-    vector_store.ensure_collection()
-    query_vector = embedding_client.embed_sync([query])[0]
-    return vector_store.search(query_vector, str(data_source_id), top_k=top_k)
+    """Nearest-neighbour search for a natural-language query, scoped to a data source.
+
+    The Milvus client and the embedding HTTP call are synchronous and block the
+    calling thread. They MUST NOT run on the event loop — otherwise a down Milvus
+    (connection refused → pymilvus blocks/retries) freezes the whole server. Run
+    them in a worker thread with a timeout so an unreachable store degrades to an
+    empty result (→ LLM fallback) instead of hanging the request.
+    """
+    def _blocking() -> list[dict[str, Any]]:
+        _log = logging.getLogger("uvicorn.error")
+        _t = time.monotonic()
+        _log.info("vector search ▸ ensure_collection")
+        vector_store.ensure_collection()
+        _log.info("vector search ▸ embed query (%dms)", int((time.monotonic() - _t) * 1000))
+        query_vector = embedding_client.embed_sync([query])[0]
+        _log.info("vector search ▸ milvus search (%dms)", int((time.monotonic() - _t) * 1000))
+        hits = vector_store.search(query_vector, str(data_source_id), top_k=top_k)
+        _log.info("vector search ▸ done: %d hits (%dms)", len(hits), int((time.monotonic() - _t) * 1000))
+        return hits
+
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_blocking), timeout=timeout)
+    except TimeoutError:
+        logging.getLogger("uvicorn.error").warning(
+            "vector search TIMED OUT after %ss — Milvus/embedding unreachable? query=%r",
+            timeout, query,
+        )
+        return []

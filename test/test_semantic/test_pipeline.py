@@ -16,7 +16,7 @@ def _mock_llm(responses):
 @pytest.mark.asyncio
 async def test_pipeline_need_confirm_gate():
     llm = _mock_llm({
-        "订单状态": '[{"table":"orders","column":"status","confidence":0.9}]',
+        "订单状态": '[{"table":"orders","column":"status","confidence":0.7}]',
     })
     async def vs(query, ds):
         return []

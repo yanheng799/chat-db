@@ -424,15 +424,32 @@ async def trigger_sync(
     if running_learn.scalar_one_or_none() is not None:
         raise HTTPException(status_code=409, detail="A learning task is already running for this data source.")
 
-    # Concurrent sync prevention
+    # Concurrent sync prevention with stale-lock detection.
+    # A sync log stuck in "running" (process crash, OOM kill, etc.) would
+    # otherwise block all subsequent syncs forever. Any lock older than
+    # SYNC_LOCK_TIMEOUT_MINUTES is considered stale and automatically
+    # marked as failed so the user can retry without manual DB edits.
+    _SYNC_LOCK_TIMEOUT_MINUTES = 30
     running_result = await session.execute(
         select(MetadataSyncLog).where(
             MetadataSyncLog.data_source_id == ds_id,
             MetadataSyncLog.status == "running",
         )
     )
-    if running_result.scalar_one_or_none() is not None:
-        raise HTTPException(status_code=409, detail="A sync is already in progress for this data source")
+    running_log = running_result.scalar_one_or_none()
+    if running_log is not None:
+        stale_since = (datetime.now() - running_log.started_at.replace(tzinfo=None)).total_seconds() / 60
+        if stale_since < _SYNC_LOCK_TIMEOUT_MINUTES:
+            raise HTTPException(status_code=409, detail="A sync is already in progress for this data source")
+        # Stale lock → auto-resolve as failed and let this sync proceed
+        running_log.status = "failed"
+        running_log.finished_at = datetime.now()
+        running_log.error_message = f"[后端] 上次同步超时（已运行 {stale_since:.0f} 分钟）"
+        await session.commit()
+        logger.warning(
+            "Cleared stale sync lock for ds=%s (was running for %.0f min, threshold %d min)",
+            ds_id, stale_since, _SYNC_LOCK_TIMEOUT_MINUTES,
+        )
 
     scope_items = payload.table_scope if payload and payload.table_scope else None
     scope_list = [{"schema": s.schema_name, "table": s.table} for s in scope_items] if scope_items else None

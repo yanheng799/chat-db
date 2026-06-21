@@ -21,8 +21,9 @@ class TestSettings:
         s = Settings()
         assert s.metadata_sync_interval_hours == 24
 
-    def test_default_encryption_key_is_empty(self) -> None:
-        s = Settings()
+    def test_default_encryption_key_is_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ENCRYPTION_KEY", raising=False)
+        s = Settings(_env_file=None)  # don't fall through to .env
         assert s.encryption_key == ""
 
     def test_reads_postgres_config(self, monkeypatch: pytest.MonkeyPatch) -> None:

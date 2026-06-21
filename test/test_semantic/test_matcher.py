@@ -44,7 +44,7 @@ async def test_vector_search_fallback():
 async def test_llm_fallback():
     async def vs(query, ds):
         return []
-    llm = _mock_llm('[{"table":"orders","column":"status","confidence":0.9}]')
+    llm = _mock_llm('[{"table":"orders","column":"status","confidence":0.7}]')
     m = await match_semantic("订单当前的状态", "ds", vector_search=vs, llm_caller=llm)
     assert m[0]["matched_by"] == "llm_fallback"
     assert m[0]["need_confirm"] is True

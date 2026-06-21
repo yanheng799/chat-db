@@ -73,6 +73,9 @@ async def test_llm_low_confidence_rejected(db_session):
 async def test_all_fail_returns_need_confirm(db_session):
     ds_id = uuid.uuid4()
     await _create_data_source(db_session, ds_id)
+    # Seed some enum candidates — need_confirm is now only True when there
+    # are known values to disambiguate (len(candidates) > 0).
+    await upsert_enum_alias(db_session, ds_id, "t", "c", "active", display="激活")
     v = await normalize_enum(db_session, "未知词", ds_id, "t", "c")
     assert v.need_confirm
     assert v.db_representation is None

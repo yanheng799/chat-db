@@ -1,6 +1,9 @@
 "use client";
+/* eslint-disable react-hooks/set-state-in-effect -- form state is intentionally reset when the dialog opens / `initial` changes */
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useId, useCallback } from "react";
+import { X } from "lucide-react";
+import { Dialog, Button, Input, Textarea, Select, Field } from "@/components/ui";
 
 interface FormData {
   name: string;
@@ -45,44 +48,55 @@ const EMPTY_FORM: FormData = {
   schema_whitelist: "",
 };
 
-export function DataSourceForm({
-  open,
-  initial,
-  onSave,
-  onClose,
-}: DataSourceFormProps) {
+const ENGINE_OPTIONS = [
+  { value: "postgresql", label: "PostgreSQL" },
+  { value: "mysql", label: "MySQL" },
+];
+
+export function DataSourceForm({ open, initial, onSave, onClose }: DataSourceFormProps) {
   const [form, setForm] = useState<FormData>(EMPTY_FORM);
   const [errors, setErrors] = useState<FieldError[]>([]);
   const [saving, setSaving] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const [dirty, setDirty] = useState(false);
 
-  useEffect(() => {
-    if (open) {
-      if (initial) {
-        setForm({
-          name: initial.name,
-          engine: initial.engine,
-          host: initial.host,
-          port: String(initial.port),
-          username: initial.username,
-          password: "", // don't backfill password
-          database: initial.database,
-          schema_whitelist: initial.schema_whitelist
-            ? JSON.stringify(initial.schema_whitelist, null, 2)
-            : "",
-        });
-      } else {
-        setForm(EMPTY_FORM);
-      }
-      setErrors([]);
-      setSaving(false);
-      setShowPassword(false);
-    }
-  }, [open, initial]);
-
-  if (!open) return null;
+  const titleId = useId();
+  const nameInputRef = useRef<HTMLInputElement>(null);
 
   const isEdit = !!initial;
+
+  useEffect(() => {
+    if (!open) return;
+    if (initial) {
+      setForm({
+        name: initial.name,
+        engine: initial.engine,
+        host: initial.host,
+        port: String(initial.port),
+        username: initial.username,
+        password: "", // don't backfill password
+        database: initial.database,
+        schema_whitelist: initial.schema_whitelist
+          ? JSON.stringify(initial.schema_whitelist, null, 2)
+          : "",
+      });
+    } else {
+      setForm(EMPTY_FORM);
+    }
+    setErrors([]);
+    setSaving(false);
+    setShowPassword(false);
+    setDirty(false);
+  }, [open, initial]);
+
+  // Close handler that warns about unsaved edits (Esc / backdrop handled by base-ui Dialog)
+  const requestClose = useCallback(() => {
+    if (saving) return;
+    if (dirty && !window.confirm("有未保存的更改，确定要关闭吗？")) return;
+    onClose();
+  }, [dirty, saving, onClose]);
+
+  if (!open) return null;
 
   const validate = (): FieldError[] => {
     const errs: FieldError[] = [];
@@ -94,9 +108,9 @@ export function DataSourceForm({
     if (!Number.isInteger(port) || port < 1 || port > 65535)
       errs.push({ field: "port", message: "端口范围 1–65535" });
     if (!form.username.trim()) errs.push({ field: "username", message: "用户名不能为空" });
-    if (!isEdit && !form.password.trim()) errs.push({ field: "password", message: "密码不能为空" });
+    if (!isEdit && !form.password.trim())
+      errs.push({ field: "password", message: "密码不能为空" });
     if (!form.database.trim()) errs.push({ field: "database", message: "数据库名不能为空" });
-    // Validate schema_whitelist JSON if provided
     if (form.schema_whitelist.trim()) {
       try {
         JSON.parse(form.schema_whitelist);
@@ -113,6 +127,14 @@ export function DataSourceForm({
     const errs = validate();
     if (errs.length > 0) {
       setErrors(errs);
+      const firstField = errs[0].field;
+      if (firstField !== "_form") {
+        window.setTimeout(() => {
+          (
+            document.querySelector(`[name="${firstField}"]`) as HTMLElement | null
+          )?.focus();
+        }, 0);
+      }
       return;
     }
     setSaving(true);
@@ -131,6 +153,7 @@ export function DataSourceForm({
         data.schema_whitelist = JSON.parse(form.schema_whitelist);
       }
       await onSave(data);
+      setDirty(false);
       onClose();
     } catch (e: unknown) {
       const msg = (e as Error).message || "保存失败";
@@ -140,94 +163,105 @@ export function DataSourceForm({
     }
   };
 
-  const set = (field: keyof FormData) => (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
-    setForm((f) => ({ ...f, [field]: e.target.value }));
-    setErrors((prev) => prev.filter((err) => err.field !== field && err.field !== "_form"));
-  };
+  const set =
+    (field: keyof FormData) =>
+    (
+      e: React.ChangeEvent<
+        HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+      >,
+    ) => {
+      setForm((f) => ({ ...f, [field]: e.target.value }));
+      setErrors((prev) => prev.filter((err) => err.field !== field && err.field !== "_form"));
+      setDirty(true);
+    };
 
   return (
-    <div className="fixed inset-0 z-40 flex justify-end">
-      {/* Backdrop */}
-      <div className="absolute inset-0 bg-black/60" onClick={onClose} />
-
-      {/* Slide-over panel */}
-      <div className="relative z-10 w-[480px] max-w-[92vw] bg-background border-l border-border h-full overflow-y-auto shadow-2xl animate-in slide-in-from-right">
+    <Dialog.Root
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) requestClose();
+      }}
+    >
+      <Dialog.Content side="right">
         {/* Header */}
-        <div className="px-6 py-5 border-b border-border flex items-center justify-between sticky top-0 bg-background z-10">
-          <h2 className="text-base font-semibold text-foreground">
+        <div className="px-6 py-5 border-b border-border flex items-center justify-between shrink-0">
+          <Dialog.Title id={titleId} className="text-base font-semibold text-foreground">
             {isEdit ? "编辑数据源" : "新建数据源"}
-          </h2>
-          <button
-            onClick={onClose}
-            className="text-muted-foreground hover:text-foreground transition-colors text-lg leading-none"
+          </Dialog.Title>
+          <Dialog.Close
             aria-label="关闭"
+            className="text-muted-foreground hover:text-foreground transition-colors"
           >
-            ✕
-          </button>
+            <X className="size-5" />
+          </Dialog.Close>
         </div>
 
-        {/* Form body */}
-        <div className="px-6 py-5 space-y-4">
-          {/* Global form error */}
-          {errFor("_form") && (
-            <div className="px-3 py-2.5 rounded-lg bg-destructive/10 border border-destructive/30 text-sm text-red-400">
+        {/* Body */}
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+          {errFor("_form") ? (
+            <div
+              role="alert"
+              className="px-3 py-2.5 rounded-lg bg-destructive/10 border border-destructive/30 text-sm text-destructive"
+            >
               {errFor("_form")!.message}
             </div>
-          )}
+          ) : null}
 
-          {/* Name */}
           <Field label="名称" required error={errFor("name")?.message}>
-            <input
-              type="text"
+            <Input
+              ref={nameInputRef}
+              name="name"
+              autoComplete="off"
               value={form.name}
               onChange={set("name")}
               placeholder="例如：生产数据库"
-              className={inputClass}
             />
           </Field>
 
-          {/* Engine */}
           <Field label="引擎" required error={errFor("engine")?.message}>
-            <select value={form.engine} onChange={set("engine")} className={inputClass}>
-              <option value="postgresql">PostgreSQL</option>
-              <option value="mysql">MySQL</option>
-            </select>
+            <Select
+              name="engine"
+              autoComplete="off"
+              value={form.engine}
+              onChange={set("engine")}
+              options={ENGINE_OPTIONS}
+            />
           </Field>
 
-          {/* Host + Port */}
           <div className="flex gap-3">
             <div className="flex-1">
               <Field label="主机" required error={errFor("host")?.message}>
-                <input
-                  type="text"
+                <Input
+                  name="host"
+                  autoComplete="off"
                   value={form.host}
                   onChange={set("host")}
                   placeholder="localhost"
-                  className={inputClass}
                 />
               </Field>
             </div>
             <div className="w-[120px]">
               <Field label="端口" required error={errFor("port")?.message}>
-                <input
+                <Input
                   type="number"
+                  name="port"
+                  inputMode="numeric"
+                  autoComplete="off"
                   value={form.port}
                   onChange={set("port")}
-                  className={inputClass}
                 />
               </Field>
             </div>
           </div>
 
-          {/* Username + Password */}
           <div className="flex gap-3">
             <div className="flex-1">
               <Field label="用户名" required error={errFor("username")?.message}>
-                <input
-                  type="text"
+                <Input
+                  name="username"
+                  autoComplete="username"
                   value={form.username}
                   onChange={set("username")}
-                  className={inputClass}
                 />
               </Field>
             </div>
@@ -238,12 +272,14 @@ export function DataSourceForm({
                 error={errFor("password")?.message}
               >
                 <div className="relative">
-                  <input
+                  <Input
                     type={showPassword ? "text" : "password"}
+                    name="password"
+                    autoComplete={isEdit ? "current-password" : "new-password"}
                     value={form.password}
                     onChange={set("password")}
                     placeholder={isEdit ? "留空不修改" : ""}
-                    className={inputClass + " pr-16"}
+                    className="pr-14"
                   />
                   <button
                     type="button"
@@ -257,77 +293,43 @@ export function DataSourceForm({
             </div>
           </div>
 
-          {/* Database */}
           <Field label="数据库" required error={errFor("database")?.message}>
-            <input
-              type="text"
+            <Input
+              name="database"
+              autoComplete="off"
               value={form.database}
               onChange={set("database")}
               placeholder="例如：chat_db"
-              className={inputClass}
             />
           </Field>
 
-          {/* Schema whitelist */}
-          <Field label="Schema 白名单 (JSON)" error={errFor("schema_whitelist")?.message}>
-            <textarea
+          <Field
+            label="Schema 白名单 (JSON)"
+            error={errFor("schema_whitelist")?.message}
+            hint="可选，限制同步范围"
+          >
+            <Textarea
+              name="schema_whitelist"
+              autoComplete="off"
               value={form.schema_whitelist}
               onChange={set("schema_whitelist")}
               placeholder='[{"schema": "public", "tables": ["orders"]}]'
               rows={4}
-              className={inputClass + " font-mono text-xs"}
+              className="font-mono text-xs"
             />
           </Field>
         </div>
 
         {/* Footer */}
-        <div className="px-6 py-4 border-t border-border sticky bottom-0 bg-background flex justify-end gap-3">
-          <button
-            onClick={onClose}
-            disabled={saving}
-            className="px-4 py-2 rounded-lg text-sm font-medium border border-border text-foreground hover:bg-secondary transition-colors"
-          >
+        <div className="px-6 py-4 border-t border-border flex justify-end gap-3 bg-background shrink-0">
+          <Button variant="outline" onClick={requestClose} disabled={saving}>
             取消
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="px-5 py-2 rounded-lg text-sm font-semibold bg-primary text-primary-foreground hover:brightness-110 transition-all disabled:opacity-50"
-          >
+          </Button>
+          <Button onClick={handleSave} disabled={saving}>
             {saving ? "保存中…" : "保存"}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </Dialog.Content>
+    </Dialog.Root>
   );
 }
-
-// ── Small inline field wrapper ────────────────────────
-
-function Field({
-  label,
-  required,
-  error,
-  children,
-}: {
-  label: string;
-  required?: boolean;
-  error?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <label className="block">
-      <span className="text-xs font-medium text-foreground/80 mb-1.5 block">
-        {label}
-        {required && <span className="text-red-400 ml-0.5">*</span>}
-      </span>
-      {children}
-      {error && (
-        <span className="text-xs text-red-400 mt-1 block">{error}</span>
-      )}
-    </label>
-  );
-}
-
-const inputClass =
-  "w-full px-3 py-2.5 bg-secondary border border-border rounded-lg text-sm text-foreground placeholder:text-muted-foreground outline-none transition-colors focus:border-primary disabled:opacity-50";

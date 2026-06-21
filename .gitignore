@@ -34,3 +34,6 @@ htmlcov/
 
 # Ruff
 .ruff_cache/
+
+# Next.js
+.next/

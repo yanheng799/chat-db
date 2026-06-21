@@ -1,35 +1,86 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { RefreshCw } from "lucide-react";
+import {
+  Tabs,
+  Card,
+  CardHeader,
+  CardTitle,
+  CardContent,
+  Badge,
+  Button,
+  Select,
+  DataTable,
+  Table,
+  THead,
+  TBody,
+  Tr,
+  Th,
+  Td,
+  EmptyState,
+  Skeleton,
+} from "@/components/ui";
 import { api } from "@/lib/api";
 
 // ── Types ──────────────────────────────────────────
 
 interface SyncStatus {
   latest: {
-    sync_type: string; status: string;
-    started_at: string; finished_at: string | null;
-    tables_added: number; tables_removed: number;
-    columns_changed: number; error_message?: string | null;
+    sync_type: string;
+    status: string;
+    started_at: string;
+    finished_at: string | null;
+    tables_added: number;
+    tables_removed: number;
+    columns_changed: number;
+    error_message?: string | null;
   } | null;
   status: string;
 }
 
-interface GraphNode { name: string; schema?: string; table?: string; type?: string; is_pk?: boolean; }
-interface GraphEdge { type: string; from_table: string; from_column: string; to_table: string; to_column: string; confidence: number; }
+interface GraphNode {
+  name: string;
+  schema?: string;
+  table?: string;
+  type?: string;
+  is_pk?: boolean;
+}
+interface GraphEdge {
+  type: string;
+  from_table: string;
+  from_column: string;
+  to_table: string;
+  to_column: string;
+  confidence: number;
+}
 
 interface MappingItem {
-  id?: string; table_name?: string; column_name?: string;
-  value?: string; display?: string; code?: string; name?: string;
-  short_name?: string; full_name?: string; target_table?: string;
+  id?: string;
+  table_name?: string;
+  column_name?: string;
+  value?: string;
+  display?: string;
+  code?: string;
+  name?: string;
+  short_name?: string;
+  full_name?: string;
+  target_table?: string;
   aliases?: string[];
 }
 
 // ── Page ───────────────────────────────────────────
 
+const MAPPING_OPTIONS = [
+  { value: "enum", label: "枚举别名" },
+  { value: "region", label: "地区" },
+  { value: "name", label: "名称简称" },
+];
+
 export default function AdminPage() {
   const [activeDsId, setActiveDsId] = useState<string>("");
   const [activeDsName, setActiveDsName] = useState<string>("");
+  const [tab, setTab] = useState<string>("sync");
 
   // Sync
   const [sync, setSync] = useState<SyncStatus | null>(null);
@@ -46,7 +97,7 @@ export default function AdminPage() {
   const [mappingsLoading, setMappingsLoading] = useState(false);
 
   // Hotwords
-  const [hotwords, setHotwords] = useState<Record<string, any>>({});
+  const [hotwords, setHotwords] = useState<Record<string, any> | any[]>({});
   const [hotwordsLoading, setHotwordsLoading] = useState(false);
 
   // Periods
@@ -67,14 +118,19 @@ export default function AdminPage() {
           setActiveDsId(active.id);
           setActiveDsName(active.name);
         }
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     })();
   }, []);
 
   // ── Card loaders ──────────────────────────────────
   const loadSync = useCallback(async () => {
     setSyncLoading(true);
-    try { setSync(await api.get<SyncStatus>("/api/admin/sync/status")); } catch { }
+    try {
+      setSync(await api.get<SyncStatus>("/api/admin/sync/status"));
+    } catch {
+    }
     setSyncLoading(false);
   }, []);
 
@@ -88,7 +144,8 @@ export default function AdminPage() {
       ]);
       setNodes(n.tables?.map((t: any) => ({ ...t })) || []);
       setEdges(e.edges || []);
-    } catch { }
+    } catch {
+    }
     setGraphLoading(false);
   }, [activeDsId]);
 
@@ -96,251 +153,421 @@ export default function AdminPage() {
     if (!activeDsId) return;
     setMappingsLoading(true);
     try {
-      const data = await api.get<any>(`/api/admin/mappings/${mappingType}?data_source_id=${activeDsId}`);
+      const data = await api.get<any>(
+        `/api/admin/mappings/${mappingType}?data_source_id=${activeDsId}`,
+      );
       setMappings(data.items || []);
-    } catch { setMappings([]); }
+    } catch {
+      setMappings([]);
+    }
     setMappingsLoading(false);
   }, [activeDsId, mappingType]);
 
   const loadHotwords = useCallback(async () => {
     setHotwordsLoading(true);
-    try { const d = await api.get<any>("/api/admin/hotwords"); setHotwords(d.items || []); } catch { }
+    try {
+      const d = await api.get<any>("/api/admin/hotwords");
+      setHotwords(d.items || []);
+    } catch {
+    }
     setHotwordsLoading(false);
   }, []);
 
   const loadPeriods = useCallback(async () => {
     setPeriodsLoading(true);
-    try { const d = await api.get<any>("/api/admin/fixed-periods"); setPeriods(d.items || []); } catch { }
+    try {
+      const d = await api.get<any>("/api/admin/fixed-periods");
+      setPeriods(d.items || []);
+    } catch {
+    }
     setPeriodsLoading(false);
   }, []);
 
   const loadAudit = useCallback(async () => {
     setAuditLoading(true);
-    try { setAudit(await api.get<any>("/api/admin/audit-policy")); } catch { }
+    try {
+      setAudit(await api.get<any>("/api/admin/audit-policy"));
+    } catch {
+    }
     setAuditLoading(false);
   }, []);
 
   // ── Load on mount / ds change ─────────────────────
-  useEffect(() => { loadSync(); }, [loadSync]);
-  useEffect(() => { if (activeDsId) { loadGraph(); loadMappings(); } }, [activeDsId, mappingType, loadGraph, loadMappings]);
-  useEffect(() => { loadHotwords(); loadPeriods(); loadAudit(); }, [loadHotwords, loadPeriods, loadAudit]);
+  useEffect(() => {
+    loadSync();
+  }, [loadSync]);
+  useEffect(() => {
+    if (activeDsId) {
+      loadGraph();
+      loadMappings();
+    }
+  }, [activeDsId, mappingType, loadGraph, loadMappings]);
+  useEffect(() => {
+    loadHotwords();
+    loadPeriods();
+    loadAudit();
+  }, [loadHotwords, loadPeriods, loadAudit]);
+
+  // ── Derived: hotwords as a flat list ──────────────
+  const hotwordList: { term: string; target_table?: string; target_column?: string; locked?: boolean }[] =
+    Array.isArray(hotwords)
+      ? hotwords.map((h: any) => ({
+          term: h.term,
+          target_table: h.target_table,
+          target_column: h.target_column,
+          locked: h.locked,
+        }))
+      : Object.entries(hotwords).map(([term, entry]: [string, any]) => ({
+          term,
+          target_table: entry?.target_table,
+          target_column: entry?.target_column,
+          locked: entry?.locked,
+        }));
 
   // ── Render ────────────────────────────────────────
   return (
-    <div className="flex-1 overflow-y-auto px-7 py-6">
-      <div className="flex items-center justify-between mb-6">
-        <h2 className="text-lg font-semibold text-foreground">管理控制台</h2>
-        {activeDsName && (
-          <span className="text-xs text-muted-foreground bg-secondary px-3 py-1 rounded-full">
-            数据源: {activeDsName}
-          </span>
-        )}
-      </div>
+    <div className="flex-1 overflow-y-auto">
+      <div className="max-w-5xl mx-auto px-7 py-6">
+        <div className="flex items-center justify-between mb-5">
+          <div>
+            <h2 className="text-lg font-semibold text-foreground">管理控制台</h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {activeDsName ? `数据源：${activeDsName}` : "未激活数据源"}
+            </p>
+          </div>
+        </div>
 
-      <div className="grid gap-5">
-        <Card title="同步状态" loading={syncLoading} onRetry={loadSync}>
-          {!sync || sync.status === "no_sync_yet" ? (
-            <Empty text="暂无同步记录" />
-          ) : sync.latest ? (
-            <div className="space-y-2 text-sm">
-              <Row label="状态" value={<StatusBadge s={sync.latest.status} />} />
-              <Row label="类型" value={sync.latest.sync_type} />
-              <Row label="时间" value={sync.latest.started_at ? new Date(sync.latest.started_at).toLocaleString("zh-CN") : "—"} />
-              <Row label="新增表" value={String(sync.latest.tables_added ?? "—")} />
-              <Row label="列变更" value={String(sync.latest.columns_changed ?? "—")} />
-              {sync.latest.error_message && (
-                <div className="text-xs text-red-400 bg-red-500/5 border border-red-500/20 rounded px-3 py-2 font-mono">{sync.latest.error_message}</div>
-              )}
-            </div>
-          ) : null}
-        </Card>
+        <Tabs.Root value={tab} onValueChange={setTab}>
+          <Tabs.List>
+            <Tabs.Tab value="sync">同步状态</Tabs.Tab>
+            <Tabs.Tab value="graph">知识图谱</Tabs.Tab>
+            <Tabs.Tab value="mappings">值映射</Tabs.Tab>
+            <Tabs.Tab value="hotwords">热词</Tabs.Tab>
+            <Tabs.Tab value="periods">日期周期</Tabs.Tab>
+            <Tabs.Tab value="audit">审核策略</Tabs.Tab>
+          </Tabs.List>
 
-        {/* ── Knowledge Graph ──────────────────────── */}
-        <Card title="知识图谱" loading={graphLoading} onRetry={loadGraph}
-          subtitle={activeDsId ? `${nodes.length} 表, ${edges.length} 关系` : "无激活数据源"}>
-          {!activeDsId ? (
-            <Empty text="请先在数据源管理中激活一个数据源" />
-          ) : nodes.length === 0 ? (
-            <Empty text="图谱为空 — 请先同步元数据并刷新知识库" />
-          ) : (
-            <div className="space-y-4">
-              {/* Tables as tag clusters */}
-              <div>
-                <span className="text-[11px] uppercase tracking-wider text-muted-foreground font-medium">表 ({nodes.length})</span>
-                <div className="flex flex-wrap gap-2 mt-2">
-                  {nodes.map((n, i) => (
-                    <span key={i} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 bg-secondary border border-border rounded-lg text-xs">
-                      <span className="w-2 h-2 rounded-full bg-primary" />
-                      {n.schema && <span className="text-muted-foreground">{n.schema}.</span>}
-                      <span className="text-foreground font-medium">{n.name}</span>
-                    </span>
-                  ))}
-                </div>
-              </div>
-              {/* Columns */}
-              {edges.length > 0 && (
-                <div>
-                  <span className="text-[11px] uppercase tracking-wider text-muted-foreground font-medium">关系 ({edges.length})</span>
-                  <div className="mt-2 space-y-1">
-                    {edges.slice(0, 20).map((e, i) => (
-                      <div key={i} className="flex items-center gap-2 text-xs">
-                        <span className="text-foreground font-medium">{e.from_table}.{e.from_column}</span>
-                        <span className={e.type === "REFERENCES" ? "text-green-400" : e.type === "INFERRED_REF" ? "text-amber-400" : "text-muted-foreground"}>
-                          {e.type === "REFERENCES" ? "→ FK →" : e.type === "INFERRED_REF" ? "→ 推断 →" : "→"}
-                        </span>
-                        <span className="text-foreground font-medium">{e.to_table}.{e.to_column}</span>
-                        {e.confidence != null && (
-                          <span className="text-muted-foreground ml-auto tabular-nums">{Math.round(e.confidence * 100)}%</span>
-                        )}
+          {/* ── Sync ─────────────────────────────────── */}
+          <Tabs.Panel value="sync">
+            <Card>
+              <CardHeader className="flex-row items-center justify-between">
+                <CardTitle>同步状态</CardTitle>
+                <Button variant="ghost" size="sm" onClick={loadSync}>
+                  <RefreshCw className="size-3.5" />
+                  刷新
+                </Button>
+              </CardHeader>
+              <CardContent>
+                {syncLoading ? (
+                  <Skeleton className="h-32 w-full" />
+                ) : !sync || sync.status === "no_sync_yet" ? (
+                  <EmptyState title="暂无同步记录" />
+                ) : sync.latest ? (
+                  <dl className="text-sm space-y-2">
+                    <DefRow label="状态">
+                      <SyncStatusBadge s={sync.latest.status} />
+                    </DefRow>
+                    <DefRow label="类型">{sync.latest.sync_type}</DefRow>
+                    <DefRow label="时间">
+                      {sync.latest.started_at
+                        ? new Date(sync.latest.started_at).toLocaleString("zh-CN")
+                        : "—"}
+                    </DefRow>
+                    <DefRow label="新增表">
+                      {String(sync.latest.tables_added ?? "—")}
+                    </DefRow>
+                    <DefRow label="列变更">
+                      {String(sync.latest.columns_changed ?? "—")}
+                    </DefRow>
+                    {sync.latest.error_message ? (
+                      <div className="text-xs text-destructive bg-destructive/5 border border-destructive/20 rounded-md px-3 py-2 font-mono break-all">
+                        {sync.latest.error_message}
                       </div>
-                    ))}
-                    {edges.length > 20 && <div className="text-xs text-muted-foreground">...还有 {edges.length - 20} 条关系</div>}
-                  </div>
-                </div>
-              )}
-            </div>
-          )}
-        </Card>
+                    ) : null}
+                  </dl>
+                ) : null}
+              </CardContent>
+            </Card>
+          </Tabs.Panel>
 
-        {/* ── Value Mappings ────────────────────────── */}
-        <Card title="值映射" loading={mappingsLoading} onRetry={loadMappings}
-          subtitle={activeDsId ? undefined : "无激活数据源"}
-          extra={
-            <select value={mappingType} onChange={e => setMappingType(e.target.value)}
-              className="text-xs bg-secondary border border-border rounded px-2 py-1 text-foreground">
-              <option value="enum">枚举别名</option>
-              <option value="region">地区</option>
-              <option value="name">名称简称</option>
-            </select>
-          }>
-          {!activeDsId ? <Empty text="请先激活数据源" /> :
-           mappings.length === 0 ? <Empty text={`暂无${mappingType === 'enum' ? '枚举别名' : mappingType === 'region' ? '地区' : '名称'}映射`} /> : (
-            <div className="space-y-1.5 max-h-64 overflow-y-auto">
-              {mappings.map((m, i) => (
-                <div key={i} className="text-xs flex items-center gap-2 px-2 py-1.5 bg-secondary/50 rounded">
-                  {mappingType === "enum" && <><span className="font-mono text-foreground">{m.table_name}.{m.column_name}</span><span className="text-muted-foreground">{m.value} → {m.display}</span></>}
-                  {mappingType === "region" && <><span className="text-muted-foreground">[{m.code}]</span><span className="text-foreground">{m.name}</span></>}
-                  {mappingType === "name" && <><span className="text-muted-foreground">{m.short_name}</span><span>→</span><span className="text-foreground">{m.full_name}</span></>}
-                  {m.aliases && m.aliases.length > 0 && <span className="text-muted-foreground ml-auto text-[10px]">{m.aliases.join(", ")}</span>}
-                </div>
-              ))}
-            </div>
-          )}
-        </Card>
+          {/* ── Graph ────────────────────────────────── */}
+          <Tabs.Panel value="graph">
+            <div className="space-y-4">
+              <Card>
+                <CardHeader>
+                  <CardTitle>
+                    表
+                    <span className="text-xs text-muted-foreground font-normal ml-2 tabular-nums">
+                      {nodes.length}
+                    </span>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {!activeDsId ? (
+                    <EmptyState title="请先在数据源管理中激活一个数据源" />
+                  ) : graphLoading ? (
+                    <Skeleton className="h-24 w-full" />
+                  ) : nodes.length === 0 ? (
+                    <EmptyState title="图谱为空" description="请先同步元数据并刷新知识库" />
+                  ) : (
+                    <DataTable
+                      columns={["Schema", "表名"]}
+                      rows={nodes.map((n) => [n.schema ?? "—", n.name])}
+                      maxHeight="320px"
+                    />
+                  )}
+                </CardContent>
+              </Card>
 
-        {/* ── Hot Words ─────────────────────────────── */}
-        <Card title="热词词典" loading={hotwordsLoading} onRetry={loadHotwords}
-          subtitle={`${Array.isArray(hotwords) ? hotwords.length : Object.keys(hotwords).length} 条`}>
-          {Array.isArray(hotwords) ? (
-            hotwords.length === 0 ? <Empty text="暂无热词" /> : (
-              <div className="space-y-1.5 max-h-64 overflow-y-auto">
-                {hotwords.map((h: any, i: number) => (
-                  <div key={i} className="text-xs flex items-center gap-2 px-2 py-1.5 bg-secondary/50 rounded">
-                    <span className="font-medium text-foreground">{h.term}</span>
-                    <span className="text-muted-foreground">→ {h.target_table}.{h.target_column || "*"}</span>
-                    {h.locked && <span className="text-amber-400 text-[10px] ml-auto">🔒 锁定</span>}
-                  </div>
-                ))}
-              </div>
-            )
-          ) : (
-            Object.keys(hotwords).length === 0 ? <Empty text="暂无热词" /> : (
-              <div className="space-y-1.5 max-h-64 overflow-y-auto">
-                {Object.entries(hotwords).map(([term, entry]: [string, any]) => (
-                  <div key={term} className="text-xs flex items-center gap-2 px-2 py-1.5 bg-secondary/50 rounded">
-                    <span className="font-medium text-foreground">{term}</span>
-                    <span className="text-muted-foreground">→ {entry.target_table}.{entry.target_column || "*"}</span>
-                    {entry.locked && <span className="text-amber-400 text-[10px] ml-auto">🔒 锁定</span>}
-                  </div>
-                ))}
-              </div>
-            )
-          )}
-        </Card>
-
-        {/* ── Fixed Periods ─────────────────────────── */}
-        <Card title="固定日期周期" loading={periodsLoading} onRetry={loadPeriods}
-          subtitle={`${periods.length} 条`}>
-          {periods.length === 0 ? <Empty text="暂无周期" /> : (
-            <div className="flex flex-wrap gap-2">
-              {periods.map((p: any, i: number) => (
-                <span key={i} className="px-2.5 py-1.5 bg-secondary border border-border rounded-lg text-xs">
-                  <span className="text-foreground font-medium">{p.name}</span>
-                  <span className="text-muted-foreground"> {p.start} ~ {p.end}</span>
-                </span>
-              ))}
+              <Card>
+                <CardHeader>
+                  <CardTitle>
+                    关系
+                    <span className="text-xs text-muted-foreground font-normal ml-2 tabular-nums">
+                      {edges.length}
+                    </span>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {!activeDsId ? (
+                    <EmptyState title="请先激活数据源" />
+                  ) : edges.length === 0 ? (
+                    <EmptyState title="暂无关系" />
+                  ) : (
+                    <div className="rounded-lg border border-border overflow-hidden">
+                      <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                        <Table>
+                          <THead>
+                            <Tr className="bg-muted/60 hover:bg-muted/60">
+                              <Th className="sticky top-0 bg-muted">起点</Th>
+                              <Th className="sticky top-0 bg-muted">关系</Th>
+                              <Th className="sticky top-0 bg-muted">终点</Th>
+                              <Th className="sticky top-0 bg-muted text-right">置信度</Th>
+                            </Tr>
+                          </THead>
+                          <TBody>
+                            {edges.slice(0, 200).map((e, i) => (
+                              <Tr key={i} className={i % 2 ? "bg-muted/30" : ""}>
+                                <Td className="font-mono text-xs">
+                                  {e.from_table}.{e.from_column}
+                                </Td>
+                                <Td>
+                                  <Badge
+                                    variant={
+                                      e.type === "REFERENCES"
+                                        ? "info"
+                                        : e.type === "INFERRED_REF"
+                                          ? "warning"
+                                          : "outline"
+                                    }
+                                  >
+                                    {e.type === "REFERENCES"
+                                      ? "外键"
+                                      : e.type === "INFERRED_REF"
+                                        ? "推断"
+                                        : e.type}
+                                  </Badge>
+                                </Td>
+                                <Td className="font-mono text-xs">
+                                  {e.to_table}.{e.to_column}
+                                </Td>
+                                <Td className="text-right tabular-nums text-muted-foreground">
+                                  {e.confidence != null ? `${Math.round(e.confidence * 100)}%` : "—"}
+                                </Td>
+                              </Tr>
+                            ))}
+                          </TBody>
+                        </Table>
+                      </div>
+                      {edges.length > 200 ? (
+                        <div className="px-3 py-2 text-xs text-muted-foreground border-t border-border">
+                          仅显示前 200 条，共 {edges.length} 条
+                        </div>
+                      ) : null}
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
             </div>
-          )}
-        </Card>
+          </Tabs.Panel>
 
-        {/* ── Audit Policy ──────────────────────────── */}
-        <Card title="审核策略" loading={auditLoading} onRetry={loadAudit}>
-          {Object.keys(audit).length === 0 ? <Empty text="未配置" /> : (
-            <div className="space-y-2 text-sm">
-              <Row label="模式" value={<span className={`font-semibold ${audit.mode === "none" ? "text-green-400" : "text-amber-400"}`}>{audit.mode === "none" ? "无审核" : audit.mode}</span>} />
-              <Row label="数据量阈值" value={String(audit.data_threshold ?? "—")} />
-              <Row label="复杂度阈值" value={String(audit.complexity_threshold ?? "—")} />
-              {audit.sensitive_tables?.length > 0 && (
-                <Row label="敏感表" value={(audit.sensitive_tables as string[]).join(", ")} />
-              )}
-            </div>
-          )}
-        </Card>
+          {/* ── Mappings ─────────────────────────────── */}
+          <Tabs.Panel value="mappings">
+            <Card>
+              <CardHeader className="flex-row items-center justify-between">
+                <CardTitle>值映射</CardTitle>
+                <Select
+                  value={mappingType}
+                  onChange={(e) => setMappingType(e.target.value)}
+                  options={MAPPING_OPTIONS}
+                  className="w-32"
+                />
+              </CardHeader>
+              <CardContent>
+                {!activeDsId ? (
+                  <EmptyState title="请先激活数据源" />
+                ) : mappingsLoading ? (
+                  <Skeleton className="h-24 w-full" />
+                ) : mappings.length === 0 ? (
+                  <EmptyState title="暂无映射" />
+                ) : (
+                  <DataTable {...mappingTable(mappingType, mappings)} maxHeight="360px" />
+                )}
+              </CardContent>
+            </Card>
+          </Tabs.Panel>
+
+          {/* ── Hotwords ─────────────────────────────── */}
+          <Tabs.Panel value="hotwords">
+            <Card>
+              <CardHeader>
+                <CardTitle>
+                  热词词典
+                  <span className="text-xs text-muted-foreground font-normal ml-2 tabular-nums">
+                    {hotwordList.length}
+                  </span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {hotwordsLoading ? (
+                  <Skeleton className="h-24 w-full" />
+                ) : hotwordList.length === 0 ? (
+                  <EmptyState title="暂无热词" />
+                ) : (
+                  <Table>
+                    <THead>
+                      <Tr className="bg-muted/60 hover:bg-muted/60">
+                        <Th>词</Th>
+                        <Th>目标</Th>
+                        <Th>状态</Th>
+                      </Tr>
+                    </THead>
+                    <TBody>
+                      {hotwordList.map((h, i) => (
+                        <Tr key={i} className={i % 2 ? "bg-muted/30" : ""}>
+                          <Td className="font-medium">{h.term}</Td>
+                          <Td className="font-mono text-xs text-muted-foreground">
+                            {h.target_table}.{h.target_column || "*"}
+                          </Td>
+                          <Td>
+                            {h.locked ? <Badge variant="warning">锁定</Badge> : <span className="text-xs text-muted-foreground">—</span>}
+                          </Td>
+                        </Tr>
+                      ))}
+                    </TBody>
+                  </Table>
+                )}
+              </CardContent>
+            </Card>
+          </Tabs.Panel>
+
+          {/* ── Periods ──────────────────────────────── */}
+          <Tabs.Panel value="periods">
+            <Card>
+              <CardHeader>
+                <CardTitle>
+                  固定日期周期
+                  <span className="text-xs text-muted-foreground font-normal ml-2 tabular-nums">
+                    {periods.length}
+                  </span>
+                </CardTitle>
+              </CardHeader>
+              <CardContent>
+                {periodsLoading ? (
+                  <Skeleton className="h-24 w-full" />
+                ) : periods.length === 0 ? (
+                  <EmptyState title="暂无周期" />
+                ) : (
+                  <DataTable
+                    columns={["名称", "起始", "结束"]}
+                    rows={periods.map((p: any) => [p.name, p.start, p.end])}
+                    maxHeight="360px"
+                  />
+                )}
+              </CardContent>
+            </Card>
+          </Tabs.Panel>
+
+          {/* ── Audit ────────────────────────────────── */}
+          <Tabs.Panel value="audit">
+            <Card>
+              <CardHeader>
+                <CardTitle>审核策略</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {auditLoading ? (
+                  <Skeleton className="h-24 w-full" />
+                ) : Object.keys(audit).length === 0 ? (
+                  <EmptyState title="未配置" />
+                ) : (
+                  <dl className="text-sm space-y-2">
+                    <DefRow label="模式">
+                      <Badge variant={audit.mode === "none" ? "success" : "warning"}>
+                        {audit.mode === "none" ? "无审核" : audit.mode}
+                      </Badge>
+                    </DefRow>
+                    <DefRow label="数据量阈值">
+                      {String(audit.data_threshold ?? "—")}
+                    </DefRow>
+                    <DefRow label="复杂度阈值">
+                      {String(audit.complexity_threshold ?? "—")}
+                    </DefRow>
+                    {audit.sensitive_tables?.length > 0 ? (
+                      <DefRow label="敏感表">
+                        {(audit.sensitive_tables as string[]).join(", ")}
+                      </DefRow>
+                    ) : null}
+                  </dl>
+                )}
+              </CardContent>
+            </Card>
+          </Tabs.Panel>
+        </Tabs.Root>
       </div>
     </div>
   );
 }
 
-// ── Sub-components ─────────────────────────────────
+// ── Helpers ─────────────────────────────────────────
 
-function Card({ title, subtitle, extra, loading, onRetry, children }: {
-  title: string; subtitle?: string; extra?: React.ReactNode;
-  loading: boolean; onRetry?: () => void; children: React.ReactNode;
-}) {
-  return (
-    <section className="bg-card border border-border rounded-xl overflow-hidden">
-      <h3 className="px-4 py-3.5 text-sm font-semibold border-b border-border flex items-center justify-between text-foreground">
-        <span>
-          {title}
-          {subtitle && <span className="text-xs text-muted-foreground font-normal ml-2">{subtitle}</span>}
-        </span>
-        <span className="flex items-center gap-2">
-          {extra}
-          {onRetry && (
-            <button onClick={onRetry} className="text-xs text-muted-foreground hover:text-foreground">刷新</button>
-          )}
-        </span>
-      </h3>
-      <div className="px-4 py-3.5">
-        {loading ? <div className="text-sm text-muted-foreground animate-pulse">加载中…</div> : children}
-      </div>
-    </section>
-  );
-}
-
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
+function DefRow({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex gap-3">
-      <span className="text-muted-foreground w-20 shrink-0">{label}</span>
-      <span className="text-foreground">{value}</span>
+      <dt className="text-muted-foreground w-24 shrink-0">{label}</dt>
+      <dd className="text-foreground flex-1 min-w-0">{children}</dd>
     </div>
   );
 }
 
-function StatusBadge({ s }: { s: string }) {
-  const map: Record<string, string> = {
-    success: "bg-green-500/10 text-green-400 border-green-500/30",
-    running: "bg-primary/10 text-primary border-primary/30",
-    failed: "bg-red-500/10 text-red-400 border-red-500/30",
-  };
-  return (
-    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium border ${map[s] || "bg-muted text-muted-foreground border-border"}`}>
-      {s === "running" && <span className="w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />}
-      {s}
-    </span>
-  );
+function SyncStatusBadge({ s }: { s: string }) {
+  if (s === "success") return <Badge variant="success">成功</Badge>;
+  if (s === "running") return <Badge variant="default">运行中</Badge>;
+  if (s === "failed") return <Badge variant="destructive">失败</Badge>;
+  return <Badge variant="outline">{s}</Badge>;
 }
 
-function Empty({ text }: { text: string }) {
-  return <div className="text-sm text-muted-foreground py-4 text-center">{text}</div>;
+function mappingTable(type: string, items: MappingItem[]): {
+  columns: string[];
+  rows: unknown[][];
+} {
+  if (type === "region") {
+    return {
+      columns: ["代码", "名称"],
+      rows: items.map((m) => [m.code ?? "", m.name ?? ""]),
+    };
+  }
+  if (type === "name") {
+    return {
+      columns: ["简称", "全称"],
+      rows: items.map((m) => [m.short_name ?? "", m.full_name ?? ""]),
+    };
+  }
+  return {
+    columns: ["表.列", "值", "显示"],
+    rows: items.map((m) => [
+      `${m.table_name}.${m.column_name}`,
+      m.value ?? "",
+      m.display ?? "",
+    ]),
+  };
 }

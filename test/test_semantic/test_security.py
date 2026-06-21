@@ -27,5 +27,15 @@ class TestSecurityValidator:
     def test_blocks_select_star(self):
         assert not validate_sql("SELECT * FROM orders LIMIT 10")["passed"]
 
-    def test_blocks_multi_table_join(self):
-        assert not validate_sql("SELECT a.id FROM orders a JOIN customers b ON a.cid=b.id LIMIT 10")["passed"]
+    def test_allows_multi_table_join(self):
+        # Since multi-table JOIN support was added, up to 4 JOINs are now allowed.
+        assert validate_sql("SELECT a.id FROM orders a JOIN customers b ON a.cid=b.id LIMIT 10")["passed"]
+
+    def test_blocks_excessive_joins(self):
+        # More than _MAX_JOINS (4) JOINs should still be blocked.
+        assert not validate_sql(
+            "SELECT a.id FROM orders a "
+            "JOIN b ON a.id=b.id JOIN c ON a.id=c.id "
+            "JOIN d ON a.id=d.id JOIN e ON a.id=e.id "
+            "JOIN f ON a.id=f.id LIMIT 10"
+        )["passed"]
