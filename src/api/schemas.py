@@ -108,6 +108,7 @@ class LearningLogResponse(BaseModel):
     l1_count: int | None = None
     l2_count: int | None = None
     l2_llm_calls: int | None = None
+    fk_inferred: int | None = None
     error_message: str | None = None
 
     model_config = {"from_attributes": True}

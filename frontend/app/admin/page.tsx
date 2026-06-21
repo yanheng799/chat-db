@@ -39,22 +39,6 @@ interface SyncStatus {
   status: string;
 }
 
-interface GraphNode {
-  name: string;
-  schema?: string;
-  table?: string;
-  type?: string;
-  is_pk?: boolean;
-}
-interface GraphEdge {
-  type: string;
-  from_table: string;
-  from_column: string;
-  to_table: string;
-  to_column: string;
-  confidence: number;
-}
-
 interface MappingItem {
   id?: string;
   table_name?: string;
@@ -85,11 +69,6 @@ export default function AdminPage() {
   // Sync
   const [sync, setSync] = useState<SyncStatus | null>(null);
   const [syncLoading, setSyncLoading] = useState(false);
-
-  // Graph
-  const [nodes, setNodes] = useState<GraphNode[]>([]);
-  const [edges, setEdges] = useState<GraphEdge[]>([]);
-  const [graphLoading, setGraphLoading] = useState(false);
 
   // Mappings
   const [mappingType, setMappingType] = useState("enum");
@@ -133,21 +112,6 @@ export default function AdminPage() {
     }
     setSyncLoading(false);
   }, []);
-
-  const loadGraph = useCallback(async () => {
-    if (!activeDsId) return;
-    setGraphLoading(true);
-    try {
-      const [n, e] = await Promise.all([
-        api.get<any>(`/api/admin/graph/nodes/${activeDsId}`),
-        api.get<any>(`/api/admin/graph/edges/${activeDsId}`),
-      ]);
-      setNodes(n.tables?.map((t: any) => ({ ...t })) || []);
-      setEdges(e.edges || []);
-    } catch {
-    }
-    setGraphLoading(false);
-  }, [activeDsId]);
 
   const loadMappings = useCallback(async () => {
     if (!activeDsId) return;
@@ -198,10 +162,9 @@ export default function AdminPage() {
   }, [loadSync]);
   useEffect(() => {
     if (activeDsId) {
-      loadGraph();
       loadMappings();
     }
-  }, [activeDsId, mappingType, loadGraph, loadMappings]);
+  }, [activeDsId, mappingType, loadMappings]);
   useEffect(() => {
     loadHotwords();
     loadPeriods();
@@ -240,7 +203,6 @@ export default function AdminPage() {
         <Tabs.Root value={tab} onValueChange={setTab}>
           <Tabs.List>
             <Tabs.Tab value="sync">同步状态</Tabs.Tab>
-            <Tabs.Tab value="graph">知识图谱</Tabs.Tab>
             <Tabs.Tab value="mappings">值映射</Tabs.Tab>
             <Tabs.Tab value="hotwords">热词</Tabs.Tab>
             <Tabs.Tab value="periods">日期周期</Tabs.Tab>
@@ -288,107 +250,6 @@ export default function AdminPage() {
                 ) : null}
               </CardContent>
             </Card>
-          </Tabs.Panel>
-
-          {/* ── Graph ────────────────────────────────── */}
-          <Tabs.Panel value="graph">
-            <div className="space-y-4">
-              <Card>
-                <CardHeader>
-                  <CardTitle>
-                    表
-                    <span className="text-xs text-muted-foreground font-normal ml-2 tabular-nums">
-                      {nodes.length}
-                    </span>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {!activeDsId ? (
-                    <EmptyState title="请先在数据源管理中激活一个数据源" />
-                  ) : graphLoading ? (
-                    <Skeleton className="h-24 w-full" />
-                  ) : nodes.length === 0 ? (
-                    <EmptyState title="图谱为空" description="请先同步元数据并刷新知识库" />
-                  ) : (
-                    <DataTable
-                      columns={["Schema", "表名"]}
-                      rows={nodes.map((n) => [n.schema ?? "—", n.name])}
-                      maxHeight="320px"
-                    />
-                  )}
-                </CardContent>
-              </Card>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>
-                    关系
-                    <span className="text-xs text-muted-foreground font-normal ml-2 tabular-nums">
-                      {edges.length}
-                    </span>
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  {!activeDsId ? (
-                    <EmptyState title="请先激活数据源" />
-                  ) : edges.length === 0 ? (
-                    <EmptyState title="暂无关系" />
-                  ) : (
-                    <div className="rounded-lg border border-border overflow-hidden">
-                      <div className="overflow-x-auto max-h-80 overflow-y-auto">
-                        <Table>
-                          <THead>
-                            <Tr className="bg-muted/60 hover:bg-muted/60">
-                              <Th className="sticky top-0 bg-muted">起点</Th>
-                              <Th className="sticky top-0 bg-muted">关系</Th>
-                              <Th className="sticky top-0 bg-muted">终点</Th>
-                              <Th className="sticky top-0 bg-muted text-right">置信度</Th>
-                            </Tr>
-                          </THead>
-                          <TBody>
-                            {edges.slice(0, 200).map((e, i) => (
-                              <Tr key={i} className={i % 2 ? "bg-muted/30" : ""}>
-                                <Td className="font-mono text-xs">
-                                  {e.from_table}.{e.from_column}
-                                </Td>
-                                <Td>
-                                  <Badge
-                                    variant={
-                                      e.type === "REFERENCES"
-                                        ? "info"
-                                        : e.type === "INFERRED_REF"
-                                          ? "warning"
-                                          : "outline"
-                                    }
-                                  >
-                                    {e.type === "REFERENCES"
-                                      ? "外键"
-                                      : e.type === "INFERRED_REF"
-                                        ? "推断"
-                                        : e.type}
-                                  </Badge>
-                                </Td>
-                                <Td className="font-mono text-xs">
-                                  {e.to_table}.{e.to_column}
-                                </Td>
-                                <Td className="text-right tabular-nums text-muted-foreground">
-                                  {e.confidence != null ? `${Math.round(e.confidence * 100)}%` : "—"}
-                                </Td>
-                              </Tr>
-                            ))}
-                          </TBody>
-                        </Table>
-                      </div>
-                      {edges.length > 200 ? (
-                        <div className="px-3 py-2 text-xs text-muted-foreground border-t border-border">
-                          仅显示前 200 条，共 {edges.length} 条
-                        </div>
-                      ) : null}
-                    </div>
-                  )}
-                </CardContent>
-              </Card>
-            </div>
           </Tabs.Panel>
 
           {/* ── Mappings ─────────────────────────────── */}

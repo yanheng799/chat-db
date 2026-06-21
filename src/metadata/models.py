@@ -203,4 +203,5 @@ class MetadataLearningLog(Base):
     l1_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     l2_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     l2_llm_calls: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    fk_inferred: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
