@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Dialog, Button } from "@/components/ui";
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -13,6 +13,11 @@ interface ConfirmDialogProps {
   onCancel: () => void;
 }
 
+/**
+ * Confirmation dialog built on the base-ui Dialog primitive (focus trap,
+ * Esc, aria-modal, scroll-lock come for free). Same props as before so
+ * callers (e.g. the datasource delete flow) need no changes.
+ */
 export function ConfirmDialog({
   open,
   title,
@@ -23,38 +28,25 @@ export function ConfirmDialog({
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
-  if (!open) return null;
-
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      {/* Backdrop */}
-      <div
-        className="absolute inset-0 bg-black/60"
-        onClick={onCancel}
-      />
-      {/* Dialog */}
-      <div className="relative bg-card border border-border rounded-2xl shadow-2xl w-[400px] max-w-[90vw] p-6 z-10">
-        <h3 className="text-base font-semibold text-foreground mb-2">{title}</h3>
-        <p className="text-sm text-muted-foreground mb-6">{message}</p>
-        <div className="flex justify-end gap-3">
-          <button
-            onClick={onCancel}
-            className="px-4 py-2 rounded-lg text-sm font-medium border border-border text-foreground hover:bg-secondary transition-colors"
-          >
+    <Dialog.Root
+      open={open}
+      onOpenChange={(o) => {
+        if (!o) onCancel();
+      }}
+    >
+      <Dialog.Content className="max-w-sm">
+        <Dialog.Title>{title}</Dialog.Title>
+        <Dialog.Description>{message}</Dialog.Description>
+        <div className="flex justify-end gap-3 mt-6">
+          <Button variant="outline" onClick={onCancel}>
             {cancelLabel}
-          </button>
-          <button
-            onClick={onConfirm}
-            className={`px-4 py-2 rounded-lg text-sm font-semibold transition-all ${
-              variant === "destructive"
-                ? "bg-destructive/20 text-destructive hover:bg-destructive/30"
-                : "bg-primary text-primary-foreground hover:brightness-110"
-            }`}
-          >
+          </Button>
+          <Button variant={variant === "destructive" ? "destructive" : "default"} onClick={onConfirm}>
             {confirmLabel}
-          </button>
+          </Button>
         </div>
-      </div>
-    </div>
+      </Dialog.Content>
+    </Dialog.Root>
   );
 }

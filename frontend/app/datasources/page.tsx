@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useRouter } from "next/navigation";
+import { Plus, Database } from "lucide-react";
+import { Button, EmptyState, Skeleton } from "@/components/ui";
 import { useDataSourceStore, type DataSource } from "@/stores/datasources";
 import { useToastStore } from "@/stores/toast";
 import { DataSourceCard } from "@/components/datasources/DataSourceCard";
@@ -20,7 +21,6 @@ function classifyError(e: unknown, action: string): string {
 }
 
 export default function DatasourcesPage() {
-  const router = useRouter();
   const {
     dataSources,
     loading,
@@ -130,13 +130,6 @@ export default function DatasourcesPage() {
     setDeleteTarget(null);
   }, [deleteTarget, deleteDataSource, showToast]);
 
-  const handleViewDetail = useCallback(
-    (ds: DataSource) => {
-      router.push(`/datasources/${ds.id}`);
-    },
-    [router],
-  );
-
   const handleSync = useCallback(
     async (ds: DataSource) => {
       setSyncingId(ds.id);
@@ -179,33 +172,42 @@ export default function DatasourcesPage() {
               {dataSources.length} 个数据源
             </p>
           </div>
-          <button
-            onClick={handleCreate}
-            className="px-4 py-2 bg-primary text-primary-foreground rounded-lg text-sm font-semibold transition-all hover:brightness-110"
-          >
-            + 新建数据源
-          </button>
+          <Button onClick={handleCreate}>
+            <Plus className="size-4" />
+            新建数据源
+          </Button>
         </div>
 
         {/* Content */}
         {loading ? (
-          <div className="text-center text-muted-foreground text-sm py-16">
-            加载中…
+          <div className="grid gap-4 sm:grid-cols-1 lg:grid-cols-2">
+            {Array.from({ length: 3 }).map((_, i) => (
+              <Skeleton key={i} className="h-24 w-full rounded-lg" />
+            ))}
           </div>
         ) : error ? (
-          <div className="text-center text-red-400 text-sm py-16">
-            加载失败: {error}
-            <button
-              onClick={loadDataSources}
-              className="ml-3 underline hover:text-red-300"
-            >
-              重试
-            </button>
-          </div>
+          <EmptyState
+            icon={Database}
+            title="加载失败"
+            description={error}
+            action={
+              <Button variant="outline" onClick={loadDataSources}>
+                重试
+              </Button>
+            }
+          />
         ) : dataSources.length === 0 ? (
-          <div className="text-center text-muted-foreground text-sm py-16">
-            暂无数据源配置，点击上方按钮新建
-          </div>
+          <EmptyState
+            icon={Database}
+            title="暂无数据源"
+            description="配置一个数据库连接，即可用自然语言查询。"
+            action={
+              <Button onClick={handleCreate}>
+                <Plus className="size-4" />
+                新建数据源
+              </Button>
+            }
+          />
         ) : (
           <div className="grid gap-4 sm:grid-cols-1 lg:grid-cols-2">
             {dataSources.map((ds) => (
@@ -216,7 +218,6 @@ export default function DatasourcesPage() {
                 onTest={handleTest}
                 onToggleActive={handleToggleActive}
                 onDelete={handleDelete}
-                onViewDetail={handleViewDetail}
                 onSync={handleSync}
                 onLearn={handleLearn}
                 testing={testingId === ds.id}

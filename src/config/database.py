@@ -32,3 +32,11 @@ def get_session_factory() -> Callable[[], AsyncSession]:
 async def get_session() -> AsyncGenerator[AsyncSession, None]:
     async with _async_session_factory() as session:
         yield session
+
+
+async def dispose_engine() -> None:
+    """Dispose the shared metadata engine. Call on application shutdown so
+    asyncpg connections terminate cleanly while the event loop is still
+    running (otherwise SQLAlchemy emits a noisy ``CancelledError`` while
+    tearing connections down against a cancelling loop)."""
+    await _engine.dispose()

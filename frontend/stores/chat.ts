@@ -38,6 +38,27 @@ const DEFAULT_STEPS: ProgressStep[] = [
   { label: "执行", status: "idle" },
 ];
 
+// Inactivity cap on a single SSE query: abort only if the stream stays
+// silent longer than this. The backend streams a `status` event per pipeline
+// phase (semantic → normalize → generate → sql → security → execute), so a
+// healthy long-running query keeps resetting this timer; it only fires when
+// the connection is truly stuck. Tune via NEXT_PUBLIC_SSE_IDLE_TIMEOUT_MS
+// (milliseconds).
+const SSE_IDLE_TIMEOUT_MS = Number(process.env.NEXT_PUBLIC_SSE_IDLE_TIMEOUT_MS) || 120_000;
+
+// Maps a streamed pipeline phase to its progress-step index.
+// Intermediate phases (normalize, generate) update the status message
+// without advancing the progress bar — the bar steps only when a
+// meaningful milestone is reached.
+const PHASE_STEP: Record<string, number> = {
+  semantic: 0,   // 语义匹配完成 → step 0 done, step 1 active
+  normalize: 0,  // still in preparation, status text only
+  generate: 1,   // SQL 生成中 → step 1 active
+  sql: 1,        // SQL + security done → step 1 done, step 2 active
+  security: 2,   // security done → step 2 done, step 3 active
+  execute: 3,    // execution done → step 3 done
+};
+
 // ── Store ──────────────────────────────────────────────
 
 interface ChatState {
@@ -114,7 +135,25 @@ export const useChatStore = create<ChatState>((set, get) => ({
     state._abortController?.abort();
 
     const ctrl = new AbortController();
-    const timeout = setTimeout(() => ctrl.abort(), 60000);
+    // Inactivity timer: reset on every SSE event. Aborts only when the stream
+    // is silent past the threshold (truly stuck) — a healthy long-running
+    // query keeps emitting phase events and stays alive.
+    let idleTimer: ReturnType<typeof setTimeout> | null = null;
+    let abortedByTimeout = false;
+    const resetIdleTimer = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        abortedByTimeout = true;
+        ctrl.abort();
+      }, SSE_IDLE_TIMEOUT_MS);
+    };
+    const clearIdleTimer = () => {
+      if (idleTimer) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+    };
+    resetIdleTimer();
 
     const userMsg: Message = {
       id: crypto.randomUUID(),
@@ -139,20 +178,15 @@ export const useChatStore = create<ChatState>((set, get) => ({
       messages: [...state.messages, userMsg, sysMsg],
     });
 
-    let stepIndex = 0;
-
-    const advanceProgress = () => {
-      if (stepIndex < 4) {
-        set((s) => ({
-          progressSteps: s.progressSteps.map((step, i) => {
-            if (i === stepIndex) return { ...step, status: "done" as const };
-            if (i === stepIndex + 1) return { ...step, status: "active" as const };
-            return step;
-          }),
-        }));
-        stepIndex++;
-      }
-    };
+    // Mark a phase's step done and the next one active.
+    const markStepDone = (idx: number) =>
+      set((s) => ({
+        progressSteps: s.progressSteps.map((step, i) => {
+          if (i === idx) return { ...step, status: "done" as const };
+          if (i === idx + 1) return { ...step, status: "active" as const };
+          return step;
+        }),
+      }));
 
     try {
       await fetchEventSource(`${api.base}/api/query`, {
@@ -164,12 +198,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         body: JSON.stringify({ text }),
         signal: ctrl.signal,
         async onopen(response) {
+          resetIdleTimer();
           if (!response.ok) {
             const body = await response.text();
             throw new Error(body || `HTTP ${response.status}`);
           }
         },
         onmessage(event) {
+          resetIdleTimer();
           let data: Record<string, unknown>;
           try {
             data = JSON.parse(event.data);
@@ -181,6 +217,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           switch (eventType) {
             case "status": {
               const msg = data.message as string;
+              const phase = data.phase as string | undefined;
               set((s) => ({
                 messages: s.messages.map((m) => {
                   if (m.id !== sysMsg.id) return m;
@@ -189,8 +226,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                   return { ...m, content: msg };
                 }),
               }));
-              // Trigger-based progress: each status event advances one step
-              advanceProgress();
+              // Phase-driven progress: set the step for this phase.
+              if (phase && phase in PHASE_STEP) markStepDone(PHASE_STEP[phase]);
               break;
             }
             case "result": {
@@ -198,7 +235,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
               const columns = resultData?.columns as string[] | undefined;
               const rows = resultData?.rows as unknown[][] | undefined;
               const sql = data.sql as string | undefined;
-              console.log("[SSE] result event:", { sql, columns, rows, hasData: !!resultData });
               set((s) => ({
                 messages: s.messages.map((m) =>
                   m.id === sysMsg.id
@@ -206,8 +242,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
                     : m
                 ),
               }));
-              // result → step4 done (trigger-based)
-              advanceProgress();
+              markStepDone(3); // execute done
               break;
             }
             case "error": {
@@ -258,42 +293,41 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         },
         onerror(err) {
-          clearTimeout(timeout);
+          clearIdleTimer();
+          const text = abortedByTimeout
+            ? "查询超时（长时间无响应，已断开）"
+            : `连接中断: ${String(err)}`;
           set((s) => ({
             queryState: "idle",
             _abortController: null,
             messages: s.messages.map((m) =>
-              m.id === sysMsg.id
-                ? { ...m, content: `❌ 连接中断: ${String(err)}` }
-                : m
+              m.id === sysMsg.id ? { ...m, content: `❌ ${text}` } : m
             ),
             progressSteps: s.progressSteps.map((step) =>
               step.status === "active" ? { ...step, status: "error" as const } : step
             ),
           }));
-          // Don't throw → stops retry
+          // Re-throw → stops fetchEventSource from retrying
           throw err;
         },
       });
     } catch (err: unknown) {
-      clearTimeout(timeout);
-      const message =
-        err instanceof Error
-          ? err.name === "AbortError"
-            ? undefined // user cancelled — no update
-            : `❌ ${err.message}`
-          : `❌ ${String(err)}`;
-      if (message) {
-        set((s) => ({
-          queryState: "idle",
-          _abortController: null,
-          messages: s.messages.map((m) =>
-            m.id === sysMsg.id ? { ...m, content: message } : m
-          ),
-        }));
-      } else {
+      clearIdleTimer();
+      const aborted =
+        err instanceof Error && err.name === "AbortError";
+      // On timeout, onerror already set the message; on user cancel, stay quiet.
+      if (abortedByTimeout || aborted) {
         set({ queryState: "idle", _abortController: null });
+        return;
       }
+      const message = err instanceof Error ? `❌ ${err.message}` : `❌ ${String(err)}`;
+      set((s) => ({
+        queryState: "idle",
+        _abortController: null,
+        messages: s.messages.map((m) =>
+          m.id === sysMsg.id ? { ...m, content: message } : m
+        ),
+      }));
     }
   },
 

@@ -1,9 +1,34 @@
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.datasources import router as datasources_router
 from api.admin import router as admin_router
+from api.datasources import _connection_manager
+from api.datasources import router as datasources_router
 from api.gateway import router as gateway_router
+from config.database import dispose_engine
+
+_log = logging.getLogger("uvicorn.error")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    yield
+    # Graceful shutdown: dispose every async engine while the event loop is
+    # still alive, so asyncpg can terminate its connections cleanly. Without
+    # this, pool teardown runs against a cancelling loop and SQLAlchemy logs
+    # "Exception terminating connection <...> ... CancelledError".
+    try:
+        await _connection_manager.dispose_all()
+    except Exception as exc:  # noqa: BLE001 - best-effort during shutdown
+        _log.warning("shutdown: dispose connection manager failed: %r", exc)
+    try:
+        await dispose_engine()
+    except Exception as exc:  # noqa: BLE001 - best-effort during shutdown
+        _log.warning("shutdown: dispose metadata engine failed: %r", exc)
+
 
 _DESCRIPTION = """
 ## Chat-DB — 自然语言数据库查询 Agent
@@ -31,6 +56,7 @@ app = FastAPI(
     openapi_tags=_TAGS,
     docs_url="/docs",
     redoc_url="/redoc",
+    lifespan=lifespan,
 )
 app.add_middleware(
     CORSMiddleware,

@@ -24,10 +24,23 @@ async def run_single_step(
     query_executor: Any = None,
     schema_desc: str = "",
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS,
+    on_progress: Any = None,
 ) -> dict[str, Any]:
-    """Run a full single-step query pipeline. Returns {result, need_confirm_items, error}."""
+    """Run a full single-step query pipeline. Returns {result, need_confirm_items, error}.
+
+    ``on_progress`` is an optional ``async (phase, message) -> None`` callback
+    invoked at each pipeline phase (``semantic`` / ``sql`` / ``security`` /
+    ``execute``); the SSE gateway uses it to stream progress to the client.
+    """
     llm_calls = 0
     need_confirm_list: list[dict] = []
+
+    async def _emit(phase: str, message: str) -> None:
+        if on_progress is not None:
+            try:
+                await on_progress(phase, message)
+            except Exception as e:  # noqa: BLE001 - progress must never break the pipeline
+                logger.warning("on_progress(%s) failed: %s", phase, e)
 
     def _llm_call(system, user):
         nonlocal llm_calls
@@ -65,8 +78,11 @@ async def run_single_step(
         if m.get("need_confirm"):
             need_confirm_list.append(m)
 
+    await _emit("semantic", "语义匹配完成")
+
     # 3. Post-normalization (enum/region/name for each matched field)
     if session is not None:
+        await _emit("normalize", "值标准化中…")
         for m in matches:
             table = m.get("table", "")
             column = m.get("column", "")
@@ -95,6 +111,7 @@ async def run_single_step(
     # 5. Try SQL generation (even if confirmation needed — show proposed SQL)
     sql = None
     if llm_caller is not None:
+        await _emit("generate", "SQL 生成中…")
         try:
             # Query graph for JOIN paths between matched tables
             join_paths = None
@@ -130,6 +147,7 @@ async def run_single_step(
             sql = None
 
         if sql:
+            await _emit("sql", "SQL 已生成")
             try:
                 from sql.security import validate_sql
                 sec = validate_sql(sql)
@@ -154,6 +172,7 @@ async def run_single_step(
                         return {"error": f"SQL security check failed: {sec['reason']}", "sql": sql}
             except Exception:
                 pass
+            await _emit("security", "安全校验通过")
 
     # 5b. Audit gate: only block execution if we CANNOT generate SQL
     # If SQL is ready and passes security, continue — show confirm items as warnings
@@ -182,6 +201,8 @@ async def run_single_step(
 
     if "error" in exec_result:
         return {"error": exec_result["error"], "sql": sql}
+
+    await _emit("execute", "执行完成")
 
     # 9. Result summary (aggregate only via LLM)
     result_data = exec_result
