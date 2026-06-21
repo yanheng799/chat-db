@@ -62,6 +62,7 @@
   - `INFERRED_REF{confidence}`（Column→Column）：来自 Phase 2 `metadata_inferred_fks`，**全部入图**，confidence 作边属性，查询侧按需过滤（不在构建期裁剪）。
 - **不建（延期）**：`SAME_MEANING`（V1 无自动来源，留空）、`JOINS_WITH{frequency}`（依赖查询历史，Phase 5+）。
 - **3.3 查询 V1**：最短 JOIN 路径（遍历 CONTAINS+REFERENCES+INFERRED_REF）+ 关联表查找；**JOIN 频次排序延期**（无查询历史数据）。
+- **3.3a 递归 FK 遍历（新增）**：从单表出发递归遍历所有可达表（`connected_subgraph`），返回完整路径链。管理端 `GET /api/admin/graph/reachable/{ds}?from={table}` 查询；Agent 端 `connected_subgraph()` 一次性连接多表，替代 N×N 两两 `shortest_join_path` 调用。
 
 ## 行为规格 — 向量库 field_descriptions（已定）
 
@@ -87,6 +88,9 @@
 - 重跑学习：图谱按源全量重建（旧边先删后建）；向量只 upsert 新增/变化的描述，未变列不重嵌入。
 - 嵌入服务不可用：图谱仍建成，向量 upsert 失败被抑制+记日志，学习流水线状态不受影响，下次重跑补齐。
 - 激活切换到新数据源：新源被构建（不擦旧源）；查询按当前激活源过滤。
+- **递归 FK 遍历**：`GET /api/admin/graph/reachable/{ds}?from=orders` 返回 orders 可达的所有表及其完整路径链（如 `orders → customers → regions → countries`），深度不超过 6。
+- 递归遍历尊重 `min_confidence`：低置信度 `INFERRED_REF` 边不会被穿越（但仍在图中）。
+- `connected_subgraph(graph_store, ds, ["orders","countries"])` 返回连接这两张表的完整路径（若连通），优于逐个两两调用。
 
 **应失败 / 边界**：
 - 未覆盖列（`semantic_description` 为空）不入向量库（检索不到）。
@@ -119,3 +123,7 @@
 - 2026-06-19（第 4 轮）：确认向量化文本 = 方案 A（`表.列：描述` 拼接、只索引已覆盖列、按描述文本变化增量）。
 - 2026-06-19（第 5 轮）：确认嵌入/失败处理 = 方案 A（两库独立、向量失败抑制+日志+下次重试、不阻断；本地模型无外发）。补全验收口径与风险扫尾，规格 refining 完成，待 `team-spec-review`。
 - 2026-06-21（第 6 轮）：确认 UX 归属——知识图谱查看功能从 Admin 页面"知识图谱"Tab **移至数据源详情页**，作为该数据源的知识图谱卡片区块，默认折叠（`Collapsible`）。Admin 页面"知识图谱"Tab 移除。后端 API（`GET /api/admin/graph/nodes|edges/{ds}`）保持不变，前端消费端改变。
+- 2026-06-21（第 7 轮）：确认递归 FK 遍历——当前 FK 推断只产出孤立的 1-hop 边，需扩展为递归连通子图。两个场景：
+  - **Scenario A（管理端）**：新增 `GET /api/admin/graph/reachable/{ds}?from={table}` → 返回该表出发可达的所有表 + 每条完整路径（A2 方案）。前端数据源详情页新增交互：选中一张表后可展开查看其可达网络。
+  - **Scenario B（Agent）**：`graph_query.py` 新增 `connected_subgraph()` 函数，一次性找出连接给定表集合的所有 JOIN 路径。`single_step.py` 中替换对 `shortest_join_path` 的 N×N 两两调用，fallback 保留旧方法。旧方法保留不删除。
+  - 两个场景共享 `_MAX_PATH_DEPTH=6` 深度上限。

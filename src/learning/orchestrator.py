@@ -30,6 +30,7 @@ from learning.splitter import split_field_name
 from metadata.models import MetadataColumn, MetadataLearningLog, MetadataTable
 
 logger = logging.getLogger(__name__)
+_log = logging.getLogger("uvicorn.error")  # surfaces in uvicorn console output
 
 # Type alias for the injected query executor
 QueryExecutor = Callable[[str], Awaitable[dict[str, Any]]]
@@ -235,6 +236,10 @@ async def run_learning(
     session.add(learning_log)
     await session.commit()
 
+    import time as _time
+    _t0 = _time.monotonic()
+    _log.info("learn: start ds=%s trigger=%s", data_source_id, trigger_type)
+
     try:
         # Count total tables and columns
         tables_result = await session.execute(
@@ -251,34 +256,44 @@ async def run_learning(
             total_columns = count_result.scalar() or 0
 
         # L0
+        _log.info("learn: L0 start ds=%s", data_source_id)
         l0_count = await run_l0(session, data_source_id)
+        _log.info("learn: L0 done ds=%s count=%d (%.0fms)", data_source_id, l0_count, (_time.monotonic() - _t0) * 1000)
 
         # L1: field name splitting
+        _log.info("learn: L1-split start ds=%s", data_source_id)
         l1_split_count = await run_l1_splitting(session, data_source_id)
+        _log.info("learn: L1-split done ds=%s count=%d (%.0fms)", data_source_id, l1_split_count, (_time.monotonic() - _t0) * 1000)
 
         # L1: pattern detection writes structural stats (enum/null_ratio/
         # numeric_range) to columns; it does NOT write semantic_description
         # and must not count toward coverage. Failure is suppressed.
+        _log.info("learn: L1-pattern start ds=%s", data_source_id)
         with contextlib.suppress(Exception):
             await _run_pattern_detection_with_ds(session, data_source_id)
+            _log.info("learn: L1-pattern done ds=%s (%.0fms)", data_source_id, (_time.monotonic() - _t0) * 1000)
 
         # L1: value-overlap FK inference (writes metadata_inferred_fks,
         # recompute-replace). Does not affect semantic coverage. Suppressed.
+        _log.info("learn: L1-fk start ds=%s", data_source_id)
         fk_inferred = 0
         with contextlib.suppress(Exception):
             fk_inferred = await _run_fk_inference_with_ds(session, data_source_id)
+            _log.info("learn: L1-fk done ds=%s inferred=%d (%.0fms)", data_source_id, fk_inferred, (_time.monotonic() - _t0) * 1000)
 
         # l1_count = splitting only (the only L1 step that writes
         # semantic_description). Pattern detection is intentionally excluded.
         l1_count = l1_split_count
 
         # L2: LLM semantic inference
+        _log.info("learn: L2 start ds=%s", data_source_id)
         l2_count = 0
         l2_llm_calls = 0
         with contextlib.suppress(Exception):
             l2_result = await _run_l2_with_ds(session, data_source_id)
             l2_count = l2_result[0]
             l2_llm_calls = l2_result[1]
+        _log.info("learn: L2 done ds=%s count=%d llm_calls=%d (%.0fms)", data_source_id, l2_count, l2_llm_calls, (_time.monotonic() - _t0) * 1000)
 
         # Coverage = columns with a non-null semantic_description, counted
         # directly from the DB. This fixes the prior bug where pattern
@@ -323,10 +338,15 @@ async def run_learning(
         if status == "failed":
             learning_log.error_message = f"[后端] {error_msg}"
         await session.commit()
+        _log.info("learn: coverage ds=%s described=%d/%d status=%s l0=%d l1=%d l2=%d fk=%d (%.0fms)",
+                  data_source_id, columns_described, total_columns, status,
+                  l0_count, l1_count, l2_count, fk_inferred, (_time.monotonic() - _t0) * 1000)
 
         # Knowledge base refresh (Phase 3): non-fatal, independent of learning status.
+        _log.info("learn: knowledge-refresh start ds=%s", data_source_id)
         with contextlib.suppress(Exception):
             await _refresh_knowledge_with_ds(session, data_source_id)
+            _log.info("learn: knowledge-refresh done ds=%s (%.0fms)", data_source_id, (_time.monotonic() - _t0) * 1000)
 
         # Enum alias seed collection (Phase 4): auto-populate from L1 detected_enum_values.
         with contextlib.suppress(Exception):

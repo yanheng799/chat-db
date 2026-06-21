@@ -113,26 +113,55 @@ async def run_single_step(
     if llm_caller is not None:
         await _emit("generate", "SQL 生成中…")
         try:
-            # Query graph for JOIN paths between matched tables
+            # Query graph for JOIN paths between matched tables.
+            # Use connected_subgraph for a single recursive traversal;
+            # fall back to the N×N pairwise shortest_join_path loop if
+            # connected_subgraph fails or times out.
             join_paths = None
             if len({m.get("table", "") for m in matches if m.get("table")}) > 1:
                 try:
-                    from knowledge.graph_query import shortest_join_path
+                    from knowledge.graph_query import connected_subgraph, shortest_join_path
                     from knowledge.graph_store import GraphStore
                     tables = list({m["table"] for m in matches if m.get("table")})
                     graph = GraphStore()
+                    paths_list: list[dict] = []
                     try:
-                        paths = []
+                        result = await connected_subgraph(
+                            graph, data_source_id, tables, min_confidence=0.5,
+                        )
+                        if result.get("connected"):
+                            # Flatten: merge all paths into a single deduped list
+                            seen: set[tuple[str, str, str, str]] = set()
+                            for path in result["connected"]:
+                                for step in path:
+                                    key = (step["from_table"], step["from_column"],
+                                           step["to_table"], step["to_column"])
+                                    if key not in seen:
+                                        seen.add(key)
+                                        paths_list.append(step)
+                            if paths_list:
+                                join_paths = paths_list
+                        if result.get("unconnected"):
+                            logger.warning(
+                                "connected_subgraph: %d tables not connected: %s",
+                                len(result["unconnected"]), result["unconnected"],
+                            )
+                    except Exception:
+                        logger.warning("connected_subgraph failed, falling back to pairwise shortest_join_path")
+                        # Fallback: pairwise shortest_join_path (preserved)
+                        paths_list = []
                         for i in range(len(tables)):
                             for j in range(i + 1, len(tables)):
-                                path = await shortest_join_path(graph, data_source_id, tables[i], tables[j],
-                                                                min_confidence=0.5)
+                                path = await shortest_join_path(
+                                    graph, data_source_id, tables[i], tables[j],
+                                    min_confidence=0.5,
+                                )
                                 if path:
                                     for step in path:
-                                        if step not in paths:
-                                            paths.append(step)
-                        if paths:
-                            join_paths = paths
+                                        if step not in paths_list:
+                                            paths_list.append(step)
+                        if paths_list:
+                            join_paths = paths_list
                     finally:
                         graph.close()
                 except Exception:

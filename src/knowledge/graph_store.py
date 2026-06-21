@@ -25,6 +25,7 @@ from metadata.models import (
 )
 
 logger = logging.getLogger(__name__)
+_log = logging.getLogger("uvicorn.error")
 
 
 def table_uid(data_source_id: str, schema: str, table: str) -> str:
@@ -209,4 +210,7 @@ async def build_graph(
         if src_uid in col_uids and tgt_uid in col_uids:
             inferred_edges.append({"src_uid": src_uid, "tgt_uid": tgt_uid, "confidence": float(ifk.confidence)})
 
+    _log.info("knowledge: graph build ds=%s tables=%d columns=%d ref_edges=%d inferred_edges=%d",
+              ds, len(table_rows), len(column_rows), len(reference_edges), len(inferred_edges))
     graph_store.rebuild(data_source_id, table_rows, column_rows, reference_edges, inferred_edges)
+    _log.info("knowledge: graph build done ds=%s", ds)
