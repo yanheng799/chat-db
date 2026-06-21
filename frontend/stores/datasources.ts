@@ -47,6 +47,7 @@ export interface LearningLog {
   l1_count: number | null;
   l2_count: number | null;
   l2_llm_calls: number | null;
+  fk_inferred: number | null;
   error_message: string | null;
 }
 

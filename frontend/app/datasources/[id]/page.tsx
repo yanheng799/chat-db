@@ -3,8 +3,9 @@
 import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { ArrowLeft, Download, Brain, RefreshCw, MoreHorizontal } from "lucide-react";
-import { Card, Badge, Menu, Skeleton, EmptyState, Spinner } from "@/components/ui";
+import { ArrowLeft, Download, Brain, RefreshCw, MoreHorizontal, ChevronDown } from "lucide-react";
+import { Card, CardHeader, CardTitle, CardContent, Badge, Collapsible, Menu, Skeleton, EmptyState, Spinner } from "@/components/ui";
+import { api } from "@/lib/api";
 import {
   useDataSourceStore,
   type SyncLog,
@@ -18,6 +19,20 @@ import { useToastStore } from "@/stores/toast";
 type TimelineEntry =
   | { kind: "sync"; data: SyncLog }
   | { kind: "learn"; data: LearningLog };
+
+interface GraphNode {
+  name: string;
+  schema?: string;
+}
+
+interface GraphEdge {
+  type: string;
+  from_table: string;
+  from_column: string;
+  to_table: string;
+  to_column: string;
+  confidence: number;
+}
 
 export default function DatasourceDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -41,6 +56,27 @@ export default function DatasourceDetailPage() {
   const [learning, setLearning] = useState(false);
   const [refreshingKb, setRefreshingKb] = useState(false);
 
+  // ── Graph ──────────────────────────────────────────
+  const [nodes, setNodes] = useState<GraphNode[]>([]);
+  const [edges, setEdges] = useState<GraphEdge[]>([]);
+  const [graphLoading, setGraphLoading] = useState(false);
+
+  const loadGraph = useCallback(async () => {
+    if (!id) return;
+    setGraphLoading(true);
+    try {
+      const [n, e] = await Promise.all([
+        api.get<any>(`/api/admin/graph/nodes/${id}`),
+        api.get<any>(`/api/admin/graph/edges/${id}`),
+      ]);
+      setNodes(n.tables?.map((t: any) => ({ name: t.name, schema: t.schema })) || []);
+      setEdges(e.edges || []);
+    } catch {
+      // Neo4j unreachable — show empty state
+    }
+    setGraphLoading(false);
+  }, [id]);
+
   // ── Load all data ─────────────────────────────────
   const loadAll = useCallback(async () => {
     if (!id) return;
@@ -52,6 +88,7 @@ export default function DatasourceDetailPage() {
         getSyncLogs(id).catch(() => [] as SyncLog[]),
         getLearningLogs(id).catch(() => [] as LearningLog[]),
       ]);
+      loadGraph(); // fire-and-forget (Neo4j may not be running)
       setDs(dsData);
       setTableCount(meta.table_count);
       setColumnCount(meta.column_count);
@@ -130,6 +167,7 @@ export default function DatasourceDetailPage() {
     try {
       const result = await refreshKnowledge(id);
       showToast("success", result.message);
+      await loadGraph();
     } catch (e: unknown) {
       showToast("error", classifyError(e));
     } finally {
@@ -158,9 +196,9 @@ export default function DatasourceDetailPage() {
   };
 
   // ── Derived stats ─────────────────────────────────
-  const l2Count = timeline
+  const fkInferred = timeline
     .filter((e) => e.kind === "learn" && e.data.status === "completed")
-    .reduce((sum, e) => sum + ((e.data as LearningLog).l2_count || 0), 0);
+    .reduce((sum, e) => sum + ((e.data as LearningLog).fk_inferred || 0), 0);
 
   const anyActionRunning = syncing || learning || refreshingKb;
 
@@ -230,8 +268,147 @@ export default function DatasourceDetailPage() {
         <div className="grid grid-cols-3 gap-4">
           <StatCard label="表" value={tableCount} sub="从数据库提取" />
           <StatCard label="列 / 字段" value={columnCount} sub="含类型与主键" />
-          <StatCard label="推断外键 (L2)" value={l2Count} sub="值重合度推断" />
+          <StatCard label="推断外键" value={fkInferred} sub="值重合度推断" />
         </div>
+
+        {/* ── Knowledge Graph ──────────────────────── */}
+        <section>
+          <Collapsible.Root defaultOpen={false}>
+            <Collapsible.Trigger className="flex items-center gap-2 w-full text-left mb-4 group">
+              <ChevronDown className="size-4 text-muted-foreground transition-transform duration-150 group-data-[panel-open]:rotate-180" />
+              <h3 className="text-sm font-semibold text-foreground">知识图谱</h3>
+              <span className="text-xs text-muted-foreground tabular-nums">
+                {graphLoading ? "…" : `${nodes.length} 表 · ${edges.length} 关系`}
+              </span>
+            </Collapsible.Trigger>
+            <Collapsible.Panel>
+              <div className="space-y-4 pb-2">
+                {/* Tables */}
+                <Card>
+                  <CardHeader>
+                    <span className="text-xs font-medium text-muted-foreground">
+                      表节点 ({nodes.length})
+                    </span>
+                  </CardHeader>
+                  <CardContent>
+                    {graphLoading ? (
+                      <Skeleton className="h-24 w-full" />
+                    ) : nodes.length === 0 ? (
+                      <EmptyState
+                        title="图谱为空"
+                        description="同步元数据并学习后，点击「操作 → 刷新知识库」构建图谱"
+                      />
+                    ) : (
+                      <div className="rounded-lg border border-border overflow-hidden max-h-80 overflow-y-auto">
+                        <table className="w-full text-sm">
+                          <thead className="bg-muted/60">
+                            <tr>
+                              <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">
+                                Schema
+                              </th>
+                              <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">
+                                表名
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {nodes.map((n, i) => (
+                              <tr
+                                key={`${n.schema ?? ""}.${n.name}`}
+                                className={i % 2 ? "bg-muted/30" : ""}
+                              >
+                                <td className="px-3 py-2 font-mono text-xs text-muted-foreground">
+                                  {n.schema ?? "—"}
+                                </td>
+                                <td className="px-3 py-2 font-mono text-xs">
+                                  {n.name}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+
+                {/* Edges */}
+                <Card>
+                  <CardHeader>
+                    <span className="text-xs font-medium text-muted-foreground">
+                      关系 ({edges.length})
+                    </span>
+                  </CardHeader>
+                  <CardContent>
+                    {graphLoading ? (
+                      <Skeleton className="h-24 w-full" />
+                    ) : edges.length === 0 ? (
+                      <EmptyState title="暂无关系" />
+                    ) : (
+                      <div className="rounded-lg border border-border overflow-hidden max-h-80 overflow-y-auto">
+                        <table className="w-full text-sm">
+                          <thead className="bg-muted/60">
+                            <tr>
+                              <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">
+                                起点
+                              </th>
+                              <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">
+                                关系
+                              </th>
+                              <th className="text-left px-3 py-2 text-xs font-medium text-muted-foreground">
+                                终点
+                              </th>
+                              <th className="text-right px-3 py-2 text-xs font-medium text-muted-foreground">
+                                置信度
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {edges.slice(0, 200).map((e, i) => (
+                              <tr
+                                key={i}
+                                className={i % 2 ? "bg-muted/30" : ""}
+                              >
+                                <td className="px-3 py-2 font-mono text-xs">
+                                  {e.from_table}.{e.from_column}
+                                </td>
+                                <td className="px-3 py-2">
+                                  <Badge
+                                    variant={
+                                      e.type === "REFERENCES"
+                                        ? "info"
+                                        : e.type === "INFERRED_REF"
+                                          ? "warning"
+                                          : "outline"
+                                    }
+                                  >
+                                    {e.type === "REFERENCES"
+                                      ? "外键"
+                                      : e.type === "INFERRED_REF"
+                                        ? "推断"
+                                        : e.type}
+                                  </Badge>
+                                </td>
+                                <td className="px-3 py-2 font-mono text-xs">
+                                  {e.to_table}.{e.to_column}
+                                </td>
+                                <td className="px-3 py-2 text-right tabular-nums text-muted-foreground text-xs">
+                                  {e.confidence != null
+                                    ? `${Math.round(e.confidence * 100)}%`
+                                    : "—"}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+            </Collapsible.Panel>
+          </Collapsible.Root>
+        </section>
 
         {/* ── Timeline ─────────────────────────────── */}
         <section>
@@ -396,6 +573,12 @@ function TimelineRow({
                 {(d as LearningLog).l2_count}
               </span>
             )}
+            {(d as LearningLog).fk_inferred != null &&
+              (d as LearningLog).fk_inferred! > 0 && (
+                <span className="text-muted-foreground/60">
+                  FK {(d as LearningLog).fk_inferred}
+                </span>
+              )}
             {(d as LearningLog).l2_llm_calls != null &&
               (d as LearningLog).l2_llm_calls! > 0 && (
                 <span className="text-muted-foreground/60">

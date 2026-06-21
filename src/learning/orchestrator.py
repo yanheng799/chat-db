@@ -264,8 +264,9 @@ async def run_learning(
 
         # L1: value-overlap FK inference (writes metadata_inferred_fks,
         # recompute-replace). Does not affect semantic coverage. Suppressed.
+        fk_inferred = 0
         with contextlib.suppress(Exception):
-            await _run_fk_inference_with_ds(session, data_source_id)
+            fk_inferred = await _run_fk_inference_with_ds(session, data_source_id)
 
         # l1_count = splitting only (the only L1 step that writes
         # semantic_description). Pattern detection is intentionally excluded.
@@ -318,6 +319,7 @@ async def run_learning(
         learning_log.l1_count = l1_count
         learning_log.l2_count = l2_count
         learning_log.l2_llm_calls = l2_llm_calls
+        learning_log.fk_inferred = fk_inferred
         if status == "failed":
             learning_log.error_message = f"[后端] {error_msg}"
         await session.commit()

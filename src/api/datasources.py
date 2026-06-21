@@ -32,6 +32,8 @@ from metadata.extractor import MySqlMetadataExtractor, PgMetadataExtractor
 from metadata.models import (
     MetadataChangeLog,
     MetadataColumn,
+    MetadataForeignKey,
+    MetadataIndex,
     MetadataLearningLog,
     MetadataSyncLog,
     MetadataTable,
@@ -67,6 +69,22 @@ def _get_encryption_key() -> str:
     if not settings.encryption_key:
         raise HTTPException(status_code=500, detail="ENCRYPTION_KEY is not configured")
     return settings.encryption_key
+
+
+def _parse_index_columns(index_def: str | list) -> list[str]:
+    """Parse column names from a pg_get_indexdef string or raw list.
+
+    ``pg_get_indexdef`` returns strings like
+    ``CREATE UNIQUE INDEX idx_name ON schema.table USING btree (col1, col2)``.
+    Returns the parenthesised column list as a list of trimmed names.
+    """
+    if isinstance(index_def, list):
+        return [str(c).strip() for c in index_def]
+    import re
+    m = re.search(r"\(([^)]+)\)", str(index_def))
+    if not m:
+        return []
+    return [c.strip().strip('"') for c in m.group(1).split(",")]
 
 
 def _humanize_error(e: Exception) -> str:
@@ -342,6 +360,55 @@ async def _run_metadata_extraction(datasource_id: uuid.UUID, ds_config: dict) ->
                         )
                     )
                     columns_count += 1
+
+            # Store indexes (unique/PK for FK inference)
+            from metadata.models import MetadataIndex
+            for i_data in data.get("indexes", []):
+                table_id_result = await session.execute(
+                    select(MetadataTable.id).where(
+                        MetadataTable.data_source_id == datasource_id,
+                        MetadataTable.schema_name == i_data["table_schema"],
+                        MetadataTable.table_name == i_data["table_name"],
+                    )
+                )
+                tid = table_id_result.scalar_one_or_none()
+                if tid is None:
+                    continue
+                col_names = _parse_index_columns(i_data.get("column_names", i_data.get("index_def", "")))
+                session.add(
+                    MetadataIndex(
+                        id=uuid.uuid4(),
+                        table_id=tid,
+                        index_name=i_data["index_name"],
+                        column_names=col_names,
+                        is_unique=bool(i_data.get("is_unique", False)),
+                    )
+                )
+
+            # Store explicit foreign keys
+            from metadata.models import MetadataForeignKey
+            for fk_data in data.get("foreign_keys", []):
+                src_result = await session.execute(
+                    select(MetadataTable.id).where(
+                        MetadataTable.data_source_id == datasource_id,
+                        MetadataTable.schema_name == fk_data["table_schema"],
+                        MetadataTable.table_name == fk_data["table_name"],
+                    )
+                )
+                src_tid = src_result.scalar_one_or_none()
+                if src_tid is None:
+                    continue
+                session.add(
+                    MetadataForeignKey(
+                        id=uuid.uuid4(),
+                        table_id=src_tid,
+                        constraint_name=fk_data.get("constraint_name", ""),
+                        column_name=fk_data["column_name"],
+                        foreign_table_schema=fk_data["foreign_table_schema"],
+                        foreign_table_name=fk_data["foreign_table_name"],
+                        foreign_column_name=fk_data["foreign_column_name"],
+                    )
+                )
 
             sync_log.status = "success"
             sync_log.finished_at = datetime.now()
@@ -811,6 +878,51 @@ async def _apply_changes(session, changes: list[dict], datasource_id: uuid.UUID)
                     col.is_nullable = nv["is_nullable"] == "YES"
                 if "column_comment" in nv:
                     col.column_comment = nv["column_comment"]
+        elif ctype == "index_added":
+            nv = ch.get("after_value") or {}
+            col_names = _parse_index_columns(nv.get("column_names", nv.get("index_def", "")))
+            session.add(
+                MetadataIndex(
+                    id=uuid.uuid4(),
+                    table_id=tid,
+                    index_name=ch["object_name"],
+                    column_names=col_names,
+                    is_unique=bool(nv.get("is_unique", False)),
+                )
+            )
+        elif ctype == "index_removed":
+            result = await session.execute(
+                select(MetadataIndex).where(
+                    MetadataIndex.table_id == tid,
+                    MetadataIndex.index_name == ch["object_name"],
+                )
+            )
+            idx = result.scalar_one_or_none()
+            if idx is not None:
+                await session.delete(idx)
+        elif ctype == "fk_added":
+            nv = ch.get("after_value") or {}
+            session.add(
+                MetadataForeignKey(
+                    id=uuid.uuid4(),
+                    table_id=tid,
+                    constraint_name=nv.get("constraint_name", ""),
+                    column_name=nv["column_name"],
+                    foreign_table_schema=nv["foreign_table_schema"],
+                    foreign_table_name=nv["foreign_table_name"],
+                    foreign_column_name=nv["foreign_column_name"],
+                )
+            )
+        elif ctype == "fk_removed":
+            result = await session.execute(
+                select(MetadataForeignKey).where(
+                    MetadataForeignKey.table_id == tid,
+                    MetadataForeignKey.constraint_name == ch["object_name"],
+                )
+            )
+            fk = result.scalar_one_or_none()
+            if fk is not None:
+                await session.delete(fk)
 
     await session.commit()
 
