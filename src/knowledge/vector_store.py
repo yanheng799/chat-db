@@ -27,6 +27,7 @@ from knowledge.embedding import EmbeddingClient
 from metadata.models import MetadataColumn, MetadataTable
 
 logger = logging.getLogger(__name__)
+_log = logging.getLogger("uvicorn.error")
 
 DEFAULT_COLLECTION = "field_descriptions"
 
@@ -222,6 +223,8 @@ async def build_field_vectors(
     items = await collect_covered_fields(session, data_source_id)
     existing = vector_store.list_embed_texts(str(data_source_id))
     plan = compute_upsert_plan(items, existing)
+    _log.info("knowledge: vector build ds=%s covered=%d existing=%d to_upsert=%d",
+              data_source_id, len(items), len(existing), len(plan))
     if not plan:
         return 0
     vectors = embedding_client.embed_sync([it["embed_text"] for it in plan])

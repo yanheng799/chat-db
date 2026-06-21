@@ -130,6 +130,38 @@ async def graph_edges(data_source_id: str):
         store.close()
 
 
+@router.get("/graph/reachable/{data_source_id}")
+async def graph_reachable(
+    data_source_id: str,
+    from_: str = Query(..., alias="from"),
+    min_confidence: float | None = Query(None, ge=0.0, le=1.0),
+):
+    """Return all tables reachable from *from_* via FK edges (recursive traversal)."""
+    from knowledge.graph_query import connected_subgraph
+    from knowledge.graph_store import GraphStore
+
+    store = GraphStore()
+    try:
+        result = await connected_subgraph(
+            store, data_source_id, [from_], min_confidence=min_confidence,
+        )
+    finally:
+        store.close()
+
+    # Flatten: one entry per reachable table with its FK steps
+    reachable: list[dict[str, Any]] = []
+    for path in result.get("connected", []):
+        if not path:
+            continue
+        reachable.append({"name": path[0]["to_table"], "path": path})
+
+    return {
+        "data_source_id": data_source_id,
+        "from_table": from_,
+        "tables": reachable,
+    }
+
+
 # ── 10.3 Value Mappings ──────────────────────────────────
 
 

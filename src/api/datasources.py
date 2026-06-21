@@ -404,9 +404,9 @@ async def _run_metadata_extraction(datasource_id: uuid.UUID, ds_config: dict) ->
                         table_id=src_tid,
                         constraint_name=fk_data.get("constraint_name", ""),
                         column_name=fk_data["column_name"],
-                        foreign_table_schema=fk_data["foreign_table_schema"],
-                        foreign_table_name=fk_data["foreign_table_name"],
-                        foreign_column_name=fk_data["foreign_column_name"],
+                        target_schema=fk_data["foreign_table_schema"],
+                        target_table=fk_data["foreign_table_name"],
+                        target_column=fk_data["foreign_column_name"],
                     )
                 )
 
@@ -908,9 +908,9 @@ async def _apply_changes(session, changes: list[dict], datasource_id: uuid.UUID)
                     table_id=tid,
                     constraint_name=nv.get("constraint_name", ""),
                     column_name=nv["column_name"],
-                    foreign_table_schema=nv["foreign_table_schema"],
-                    foreign_table_name=nv["foreign_table_name"],
-                    foreign_column_name=nv["foreign_column_name"],
+                    target_schema=nv["foreign_table_schema"],
+                    target_table=nv["foreign_table_name"],
+                    target_column=nv["foreign_column_name"],
                 )
             )
         elif ctype == "fk_removed":

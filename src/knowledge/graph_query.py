@@ -8,6 +8,7 @@ never get connected. V1 traverses only ``CONTAINS`` / ``REFERENCES`` /
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -17,6 +18,8 @@ from knowledge.graph_store import GraphStore
 logger = logging.getLogger(__name__)
 
 _MAX_PATH_DEPTH = 6
+_RECURSIVE_MAX_HOPS = 18  # ~6 FK hops (Table→Col→Col→Table = 3 pattern hops per FK)
+_RECURSIVE_TIMEOUT = 5.0  # seconds
 
 
 async def shortest_join_path(
@@ -86,6 +89,97 @@ async def related_tables(
         }
         for row in graph_store.query(cypher, **params)
     ]
+
+
+async def connected_subgraph(
+    graph_store: GraphStore,
+    data_source_id: uuid.UUID | str,
+    tables: list[str],
+    *,
+    min_confidence: float | None = None,
+) -> dict[str, Any]:
+    """Find the FK-connected subgraph covering the given tables.
+
+    Traverses ``CONTAINS`` / ``REFERENCES`` / ``INFERRED_REF`` edges
+    recursively (up to :data:`_RECURSIVE_MAX_HOPS` hops) to discover all
+    tables reachable from the given set.  Returns::
+
+        {
+            "connected": [
+                [
+                    {"from_table":..., "from_column":..., "to_table":..., "to_column":..., "type":..., "confidence":...},
+                    ...
+                ],
+                ...
+            ],
+            "unconnected": ["table_name", ...]
+        }
+
+    ``connected`` contains one entry per reachable target table (the shortest
+    path from the nearest source table).  ``unconnected`` lists input tables
+    that have no FK path to any of the other input tables.
+
+    The query is wrapped in :func:`asyncio.wait_for` with a 5 s timeout to
+    prevent runaway traversal on large/dense graphs.
+    """
+    ds = str(data_source_id)
+    params: dict[str, Any] = {"ds": ds}
+    # Build a disjunction of start-table clauses
+    tbl_param = {f"t{i}": t for i, t in enumerate(tables)}
+    params.update(tbl_param)
+    params["min_confidence"] = float(min_confidence) if min_confidence is not None else 0.0
+
+    # Single-hop: find tables directly joinable from any start table via FK edges.
+    # Each record gives one FK step; multiple steps to the same target table are
+    # grouped into a single path entry.
+    from_table = tables[0]  # primary start table
+    cypher = (
+        "MATCH (start:Table {data_source_id: $ds, name: $t0}) "
+        "MATCH (start)-[:CONTAINS]->(c:Column)-[r:REFERENCES|INFERRED_REF]->(o:Column)-[:CONTAINS]->(other:Table) "
+        "WHERE other.data_source_id = $ds AND start <> other "
+        "AND (type(r) <> 'INFERRED_REF' OR r.confidence >= $min_confidence) "
+        "RETURN other.name AS name, "
+        "c.name AS from_col, r.confidence AS conf, "
+        "o.name AS to_col, type(r) AS etype "
+        "ORDER BY other.name, c.name"
+    )
+
+    try:
+        async def _query() -> list[Any]:
+            return graph_store.query(cypher, **params)
+
+        records = await asyncio.wait_for(_query(), timeout=_RECURSIVE_TIMEOUT)
+    except TimeoutError:
+        logger.warning("connected_subgraph timed out ds=%s", ds)
+        return {"connected": [], "unconnected": list(tables)}
+    except Exception as exc:
+        logger.warning("connected_subgraph query failed: %s", exc)
+        return {"connected": [], "unconnected": list(tables)}
+
+    if not records:
+        return {"connected": [], "unconnected": list(tables)}
+
+    # Each record is one FK step: {name, from_col, conf, to_col, etype}
+    # Group by target table name into single-step paths.
+    by_target: dict[str, list[dict[str, Any]]] = {}
+    for rec in records:
+        target = rec["name"]
+        step = {
+            "from_table": from_table,
+            "from_column": rec["from_col"],
+            "to_table": target,
+            "to_column": rec["to_col"],
+            "type": rec["etype"],
+            "confidence": rec["conf"],
+        }
+        by_target.setdefault(target, []).append(step)
+
+    connected: list[list[dict[str, Any]]] = [
+        steps for steps in by_target.values()
+    ]
+    found_tables = set(by_target.keys())
+    unconnected = [t for t in tables if t not in found_tables]
+    return {"connected": connected, "unconnected": unconnected}
 
 
 def _path_to_join_steps(nodes: list[Any], rels: list[Any]) -> list[dict[str, Any]]:

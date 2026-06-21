@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { ArrowLeft, Download, Brain, RefreshCw, MoreHorizontal, ChevronDown } from "lucide-react";
-import { Card, CardHeader, CardTitle, CardContent, Badge, Collapsible, Menu, Skeleton, EmptyState, Spinner } from "@/components/ui";
+import { Card, CardHeader, CardTitle, CardContent, Badge, Collapsible, Menu, Select, Skeleton, EmptyState, Spinner } from "@/components/ui";
 import { api } from "@/lib/api";
 import {
   useDataSourceStore,
@@ -76,6 +76,32 @@ export default function DatasourceDetailPage() {
     }
     setGraphLoading(false);
   }, [id]);
+
+  // ── Reachable subgraph ──────────────────────────────
+  const [reachableLoading, setReachableLoading] = useState(false);
+  const [reachableError, setReachableError] = useState<string | null>(null);
+  const [reachableTables, setReachableTables] = useState<
+    { name: string; path: { from_table: string; from_column: string; to_table: string; to_column: string; type: string; confidence: number }[] }[]
+  >([]);
+
+  const loadReachable = useCallback(
+    async (fromTable: string) => {
+      if (!id || !fromTable) return;
+      setReachableLoading(true);
+      setReachableError(null);
+      setReachableTables([]);
+      try {
+        const data = await api.get<any>(
+          `/api/admin/graph/reachable/${id}?from=${encodeURIComponent(fromTable)}`,
+        );
+        setReachableTables(data.tables || []);
+      } catch (e: unknown) {
+        setReachableError((e as Error).message || "请求失败");
+      }
+      setReachableLoading(false);
+    },
+    [id],
+  );
 
   // ── Load all data ─────────────────────────────────
   const loadAll = useCallback(async () => {
@@ -406,6 +432,76 @@ export default function DatasourceDetailPage() {
                   </CardContent>
                 </Card>
               </div>
+
+              {/* ── Reachable Network Explorer ─────────── */}
+              {nodes.length > 0 && (
+                <Card>
+                  <CardHeader>
+                    <CardTitle>可达网络</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    <Select
+                      options={[
+                        { value: "", label: "选择一张起始表查看可达网络…" },
+                        ...nodes.map((n) => ({
+                          value: n.name,
+                          label: `${n.schema ? n.schema + "." : ""}${n.name}`,
+                        })),
+                      ]}
+                      value=""
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        if (v) loadReachable(v);
+                      }}
+                    />
+                    {reachableLoading ? (
+                      <Skeleton className="h-16 w-full" />
+                    ) : reachableError ? (
+                      <div className="text-xs text-destructive">{reachableError}</div>
+                    ) : reachableTables.length > 0 ? (
+                      <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                        {reachableTables.map((r) => (
+                          <details key={r.name} className="text-sm border border-border rounded-md">
+                            <summary className="px-3 py-2 cursor-pointer hover:bg-muted/50 font-mono text-xs">
+                              {r.name}
+                              <span className="text-muted-foreground ml-2">
+                                ({r.path.length} 步)
+                              </span>
+                            </summary>
+                            <div className="px-3 pb-2 space-y-1">
+                              {r.path.map((step, si) => (
+                                <div
+                                  key={si}
+                                  className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                                >
+                                  <span className="font-mono">{step.from_table}.{step.from_column}</span>
+                                  <span>→</span>
+                                  <Badge
+                                    variant={step.type === "REFERENCES" ? "info" : "warning"}
+                                  >
+                                    {step.type === "REFERENCES" ? "外键" : "推断"}
+                                  </Badge>
+                                  <span>→</span>
+                                  <span className="font-mono">{step.to_table}.{step.to_column}</span>
+                                  {step.confidence != null && (
+                                    <span className="tabular-nums">
+                                      ({Math.round(step.confidence * 100)}%)
+                                    </span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </details>
+                        ))}
+                      </div>
+                    ) : reachableTables.length === 0 && !reachableLoading && !reachableError ? (
+                      <div className="text-xs text-muted-foreground">
+                        选择起始表后查看递归可达网络
+                      </div>
+                    ) : null}
+                  </CardContent>
+                </Card>
+              )}
             </Collapsible.Panel>
           </Collapsible.Root>
         </section>
