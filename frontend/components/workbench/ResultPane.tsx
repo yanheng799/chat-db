@@ -19,7 +19,7 @@ interface ResultPaneProps {
  * strings, then fall back to arbitrary status text.
  */
 export function ResultPane({ message, onConfirm, onCancel }: ResultPaneProps) {
-  const c = message.content;
+  const c = message.content ?? "";
 
   if (c === "result") return <ResultView message={message} />;
   if (c === "confirm")

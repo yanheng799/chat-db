@@ -10,6 +10,7 @@ import logging
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_log = logging.getLogger("uvicorn.error")
 
 DEFAULT_MAX_LLM_CALLS = 5
 
@@ -25,15 +26,34 @@ async def run_single_step(
     schema_desc: str = "",
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS,
     on_progress: Any = None,
+    context: list[dict[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Run a full single-step query pipeline. Returns {result, need_confirm_items, error}.
 
     ``on_progress`` is an optional ``async (phase, message) -> None`` callback
     invoked at each pipeline phase (``semantic`` / ``sql`` / ``security`` /
     ``execute``); the SSE gateway uses it to stream progress to the client.
+
+    ``context`` is an optional list of ``{role, content}`` dicts representing
+    previous conversation turns.  When provided, it is prepended to every LLM
+    user prompt so the model can resolve anaphora (e.g. "其中最大的文件").
     """
     llm_calls = 0
     need_confirm_list: list[dict] = []
+
+    # Build a context prefix once and inject into all LLM user prompts
+    _ctx_prefix = ""
+    if context:
+        lines = ["以下是之前的对话记录，仅用于参考上下文："]
+        for turn in context[-5:]:  # keep last 5 turns
+            role = "用户" if turn.get("role") == "user" else "助手"
+            text = (turn.get("content") or "")[:200]
+            lines.append(f"{role}：{text}")
+        _ctx_prefix = "\n".join(lines) + "\n---\n"
+    logger.info("[ctx] run_single_step received context=%d turns, prefix_len=%d, prefix_preview=%r",
+                len(context or []), len(_ctx_prefix), _ctx_prefix[:160])
+    _log.info("[ctx] run_single_step received context=%d turns, prefix_len=%d, prefix_preview=%r",
+              len(context or []), len(_ctx_prefix), _ctx_prefix[:160])
 
     async def _emit(phase: str, message: str) -> None:
         if on_progress is not None:
@@ -47,7 +67,12 @@ async def run_single_step(
         if llm_calls >= max_llm_calls:
             raise RuntimeError(f"LLM call limit ({max_llm_calls}) reached")
         llm_calls += 1
-        return llm_caller(system, user)
+        user_with_ctx = _ctx_prefix + user if _ctx_prefix else user
+        logger.info("[ctx] _llm_call#%d ctx_injected=%s user_prompt_head=%r",
+                    llm_calls, bool(_ctx_prefix), user_with_ctx[:200])
+        _log.info("[ctx] _llm_call#%d ctx_injected=%s user_prompt_head=%r",
+                  llm_calls, bool(_ctx_prefix), user_with_ctx[:200])
+        return llm_caller(system, user_with_ctx)
 
     # 1. Time pre-normalization
     norm_values = []
@@ -233,25 +258,25 @@ async def run_single_step(
 
     await _emit("execute", "执行完成")
 
-    # 9. Result summary (aggregate only via LLM)
+    # 9. Result summary — LLM for small result sets, generic count for large ones
     result_data = exec_result
     summary_text = None
-    if _is_aggregate(sql):
+    row_count = len(result_data["rows"]) if isinstance(result_data, dict) and "rows" in result_data else 0
+    if 0 < row_count <= 50:
         try:
-            system = "Summarize the query result in one natural-language sentence."
-            user = f"Query: {nl_text}\nResult: {result_data['rows']}"
+            system = (
+                "你是一个数据库查询助手。根据用户的问题和查询结果，用一句自然语言中文回答用户的问题。"
+                "如果结果是聚合值，直接报告数值。如果结果是列表，简要概括内容（如涉及哪些主要项）。"
+                "不要重复列名，不要输出表格。"
+            )
+            user = f"用户问题：{nl_text}\n查询结果（前50行）：{result_data['rows'][:50]}"
             summary_text = await _llm_call(system, user)
         except Exception:
-            summary_text = f"Query returned {len(result_data['rows'])} rows."
+            summary_text = f"查询返回 {row_count} 条记录。"
 
     return {
         "result": result_data,
-        "summary": summary_text or f"Returned {len(result_data['rows'])} row(s).",
+        "summary": summary_text or f"查询返回 {row_count} 条记录。",
         "sql": sql,
         "need_confirm_items": need_confirm_list,
     }
-
-
-def _is_aggregate(sql: str) -> bool:
-    import re
-    return bool(re.search(r"(?i)\b(COUNT|SUM|AVG|MIN|MAX)\s*\(", sql))

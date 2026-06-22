@@ -23,11 +23,16 @@ logger = logging.getLogger("uvicorn.error")
 router = APIRouter(prefix="/api", tags=["gateway"])
 _session_mgr = SessionManager()
 _query_store: dict[str, dict] = {}  # query_id → query detail
-_session_list: set[str] = set()     # known session ids
+# In-flight (session_id, normalized_text) → guards against duplicate POSTs.
+# fetchEventSource reconnects under the hood and re-POSTs the same query,
+# bypassing the frontend's queryState guard. Returning 409 for an in-flight
+# duplicate makes its onopen throw → onerror → stops the reconnect cycle.
+_active_queries: set[tuple[str, str]] = set()
 
 
 class QueryRequest(BaseModel):
     text: str
+    data_source_id: str | None = None  # optional; falls back to is_active=True
 
 
 class ConfirmRequest(BaseModel):
@@ -79,8 +84,14 @@ def _event_type(event: str | None) -> str:
 @router.post("/query")
 async def query(req: QueryRequest, x_session_id: str | None = Header(None)):
     sid = x_session_id or _session_mgr.create_session()
+    # Dedup: reject duplicate (sid, text) while one is already in flight.
+    dedup_key = (sid, req.text.strip())
+    if dedup_key in _active_queries:
+        logger.info("dedup: rejected duplicate query sid=%s text=%r", sid, _preview(req.text, 60))
+        from fastapi import HTTPException
+        raise HTTPException(409, "duplicate query in progress")
+    _active_queries.add(dedup_key)
     qid = str(uuid.uuid4())
-    _session_list.add(sid)
     _query_store[qid] = {"text": req.text, "session_id": sid, "status": "running"}
     logger.info("[%s] POST /api/query received sid=%s", qid, sid)
 
@@ -135,17 +146,28 @@ async def query(req: QueryRequest, x_session_id: str | None = Header(None)):
                 settings = Settings()
 
                 async for db_session in _db_session_factory():
-                    ds_result = await db_session.execute(
-                        select(DataSource).where(DataSource.is_active.is_(True)).limit(1)
-                    )
-                    active_ds = ds_result.scalar_one_or_none()
-                    ds_id = str(active_ds.id) if active_ds else sid
-                    if active_ds:
-                        logger.info("[%s] active datasource id=%s engine=%s %s@%s:%s/%s",
-                                    qid, ds_id, active_ds.engine, active_ds.username,
-                                    active_ds.host, active_ds.port, active_ds.database)
+                    # Use explicit data_source_id if provided; otherwise fall back to active.
+                    if req.data_source_id:
+                        ds_result = await db_session.execute(
+                            select(DataSource).where(DataSource.id == req.data_source_id).limit(1)
+                        )
+                        active_ds = ds_result.scalar_one_or_none()
+                        if active_ds is None:
+                            result = {"error": f"数据源不存在: {req.data_source_id}"}
+                            break
+                        logger.info("[%s] explicit datasource id=%s", qid, req.data_source_id)
                     else:
-                        logger.warning("[%s] no active datasource", qid)
+                        ds_result = await db_session.execute(
+                            select(DataSource).where(DataSource.is_active.is_(True)).limit(1)
+                        )
+                        active_ds = ds_result.scalar_one_or_none()
+                        if active_ds:
+                            logger.info("[%s] active datasource id=%s engine=%s %s@%s:%s/%s",
+                                        qid, str(active_ds.id), active_ds.engine, active_ds.username,
+                                        active_ds.host, active_ds.port, active_ds.database)
+                        else:
+                            logger.warning("[%s] no active datasource", qid)
+                    ds_id = str(active_ds.id) if active_ds else sid
 
                     schema_desc = ""
                     if active_ds:
@@ -225,7 +247,18 @@ async def query(req: QueryRequest, x_session_id: str | None = Header(None)):
                                     qid, phase, message, int((time.monotonic() - t0) * 1000))
                         _emit(phase, message)
 
-                    logger.info("[%s] pipeline start", qid)
+                    # Load recent conversation turns for context
+                    prev_turns = _session_mgr.get_context(sid)
+                    context: list[dict[str, str]] | None = None
+                    if prev_turns:
+                        ctx: list[dict[str, str]] = []
+                        for t in prev_turns[-5:]:
+                            ctx.append({"role": "user", "content": t.get("user", "")})
+                            ctx.append({"role": "assistant", "content": t.get("assistant", "")})
+                        context = ctx if ctx else None
+                    logger.info("[%s] ctx: prev_turns=%d built_context_msgs=%d sample=%s",
+                                qid, len(prev_turns), len(context or []),
+                                (context[:2] if context else None))
                     result = await run_single_step(
                         req.text, ds_id,
                         session=db_session,
@@ -234,6 +267,7 @@ async def query(req: QueryRequest, x_session_id: str | None = Header(None)):
                         query_executor=_query_executor,
                         schema_desc=schema_desc,
                         on_progress=_on_progress,
+                        context=context,
                     )
                     logger.info("[%s] pipeline done in %dms: %s",
                                 qid, int((time.monotonic() - t0) * 1000), _summarize_result(result))
@@ -276,7 +310,7 @@ async def query(req: QueryRequest, x_session_id: str | None = Header(None)):
                 _emit_raw(_sse_event("error", {"detail": str(e)}))
             finally:
                 logger.info("[%s] sse: _run_pipeline exiting (pipeline_done set)", qid)
-                _session_mgr.add_turn(sid, req.text, str(result.get("summary", "")))
+                _session_mgr.add_turn(sid, req.text, str(result.get("summary", "")), sql=result.get("sql"))
                 _emit_raw(_sse_event("done", {}))
                 _pipeline_done.set()
 
@@ -306,8 +340,17 @@ async def query(req: QueryRequest, x_session_id: str | None = Header(None)):
                 continue
             _buf_ready.clear()
 
-        await pipeline_task
-        logger.info("[%s] query complete in %dms", qid, int((time.monotonic() - t0) * 1000))
+        try:
+            await pipeline_task
+            logger.info("[%s] query complete in %dms", qid, int((time.monotonic() - t0) * 1000))
+        finally:
+            # Always release the dedup lock — even if the client disconnected
+            # mid-stream. Starlette closes an async generator by throwing
+            # GeneratorExit at the suspended `await` above, which skips any
+            # bare trailing code; without this finally the (sid, text) key
+            # would leak in _active_queries and 409 that exact query until the
+            # process restarts.
+            _active_queries.discard(dedup_key)
 
     return StreamingResponse(generate(), media_type="text/event-stream",
                              headers={"X-Session-Id": sid} if not x_session_id else {})
@@ -339,7 +382,9 @@ async def create_session():
 
 @router.get("/conversations")
 async def list_conversations():
-    return {"sessions": [{"session_id": s} for s in sorted(_session_list)]}
+    sessions = _session_mgr.list_sessions()
+    sessions.sort(key=lambda s: s["session_id"])
+    return {"sessions": sessions}
 
 
 # ── GET /api/conversations/{sid} ────────────────────────────
@@ -349,6 +394,12 @@ async def list_conversations():
 async def get_conversations(session_id: str):
     ctx = _session_mgr.get_context(session_id)
     return {"session_id": session_id, "turns": ctx}
+
+
+@router.delete("/conversations/{session_id}")
+async def delete_conversation(session_id: str):
+    _session_mgr.end_session(session_id)
+    return {"session_id": session_id, "status": "deleted"}
 
 
 # ── POST /api/query/{id}/confirm & cancel ─────────────────

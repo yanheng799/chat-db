@@ -27,11 +27,16 @@ export function QueryBar() {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
+  const pending = useRef(false);
+
   const submit = useCallback(() => {
     const text = ref.current?.value.trim();
-    if (!text || isRunning) return;
+    if (!text || isRunning || pending.current) return;
     if (!sessionId) {
-      createSession().then(() => sendQuery(text));
+      pending.current = true;
+      createSession()
+        .then(() => sendQuery(text))
+        .finally(() => { pending.current = false; });
     } else {
       sendQuery(text);
     }
@@ -49,7 +54,7 @@ export function QueryBar() {
   };
 
   return (
-    <div className="shrink-0 border-b border-border bg-background">
+    <div className="shrink-0 border-t border-border bg-background">
       <div className="flex items-end gap-2 max-w-5xl mx-auto px-6 py-3">
         <span aria-hidden="true" className="text-muted-foreground font-mono pb-2.5 select-none">
           ❯

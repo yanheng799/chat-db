@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
+_log = logging.getLogger("uvicorn.error")
 
 _SCHEMA_PROMPT_TMPL = """你是一个数据库查询 SQL 生成助手。根据以下信息生成一条只读 SQL 查询。
 
@@ -66,8 +67,11 @@ async def generate_sql(
         norm_values=", ".join(norm_parts) if norm_parts else "（无）",
     )
     system = "你是一个 PostgreSQL SQL 生成器，只返回 SQL 语句。"
+    _log.info("sql-gen: system=%r", system)
+    _log.info("sql-gen: user_prompt=%s", prompt[:500])
     try:
         response = await llm_caller(system, prompt)
+        _log.info("sql-gen: response=%s", response[:500])
         return _extract_sql(response)
     except Exception as e:
         logger.warning("SQL generation failed: %s", e)
