@@ -10,7 +10,6 @@ import logging
 from typing import Any
 
 logger = logging.getLogger(__name__)
-_log = logging.getLogger("uvicorn.error")
 
 DEFAULT_MAX_LLM_CALLS = 5
 
@@ -52,8 +51,6 @@ async def run_single_step(
         _ctx_prefix = "\n".join(lines) + "\n---\n"
     logger.info("[ctx] run_single_step received context=%d turns, prefix_len=%d, prefix_preview=%r",
                 len(context or []), len(_ctx_prefix), _ctx_prefix[:160])
-    _log.info("[ctx] run_single_step received context=%d turns, prefix_len=%d, prefix_preview=%r",
-              len(context or []), len(_ctx_prefix), _ctx_prefix[:160])
 
     async def _emit(phase: str, message: str) -> None:
         if on_progress is not None:
@@ -70,8 +67,6 @@ async def run_single_step(
         user_with_ctx = _ctx_prefix + user if _ctx_prefix else user
         logger.info("[ctx] _llm_call#%d ctx_injected=%s user_prompt_head=%r",
                     llm_calls, bool(_ctx_prefix), user_with_ctx[:200])
-        _log.info("[ctx] _llm_call#%d ctx_injected=%s user_prompt_head=%r",
-                  llm_calls, bool(_ctx_prefix), user_with_ctx[:200])
         return llm_caller(system, user_with_ctx)
 
     # 1. Time pre-normalization

@@ -5,7 +5,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { ArrowLeft, Download, Brain, RefreshCw, MoreHorizontal, ChevronDown } from "lucide-react";
 import { Card, CardHeader, CardTitle, CardContent, Badge, Collapsible, Menu, Select, Skeleton, EmptyState, Spinner } from "@/components/ui";
-import { api } from "@/lib/api";
+import { api, apiHost } from "@/lib/api";
 import {
   useDataSourceStore,
   type SyncLog,
@@ -153,7 +153,7 @@ export default function DatasourceDetailPage() {
     const msg = e.message;
     if (msg.includes("409")) return "已有任务运行中";
     if (msg.includes("Failed to fetch") || msg.includes("NetworkError"))
-      return "网络错误：无法连接后端服务 (localhost:8000)";
+      return `网络错误：无法连接后端服务 (${apiHost})`;
     if (msg.startsWith("[后端]")) return msg;
     if (msg.includes("HTTP 5")) return `后端错误: ${msg}`;
     return msg;

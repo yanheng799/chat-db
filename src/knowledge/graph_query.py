@@ -133,9 +133,14 @@ async def connected_subgraph(
     # Each record gives one FK step; multiple steps to the same target table are
     # grouped into a single path entry.
     from_table = tables[0]  # primary start table
+    # Edges matched undirected: the stored FK edge points source→target, so a
+    # directed match misses the target table when it is the traversal start
+    # (tables[] order is nondeterministic); a JOIN is valid either way. This
+    # mirrors shortest_join_path above. The trailing CONTAINS is also reversed
+    # in the graph (Table→Column), so it must be undirected too.
     cypher = (
         "MATCH (start:Table {data_source_id: $ds, name: $t0}) "
-        "MATCH (start)-[:CONTAINS]->(c:Column)-[r:REFERENCES|INFERRED_REF]->(o:Column)-[:CONTAINS]->(other:Table) "
+        "MATCH (start)-[:CONTAINS]-(c:Column)-[r:REFERENCES|INFERRED_REF]-(o:Column)-[:CONTAINS]-(other:Table) "
         "WHERE other.data_source_id = $ds AND start <> other "
         "AND (type(r) <> 'INFERRED_REF' OR r.confidence >= $min_confidence) "
         "RETURN other.name AS name, "
