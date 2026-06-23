@@ -8,13 +8,14 @@ import { useToastStore } from "@/stores/toast";
 import { DataSourceCard } from "@/components/datasources/DataSourceCard";
 import { DataSourceForm } from "@/components/datasources/DataSourceForm";
 import { ConfirmDialog } from "@/components/shared/ConfirmDialog";
+import { apiHost } from "@/lib/api";
 
 function classifyError(e: unknown, action: string): string {
   if (!(e instanceof Error)) return String(e);
   const msg = e.message;
   if (msg.includes("409")) return `${action}任务已在运行中`;
   if (msg.includes("Failed to fetch") || msg.includes("NetworkError"))
-    return `🌐 网络错误：无法连接后端 (localhost:8000)`;
+    return `🌐 网络错误：无法连接后端 (${apiHost})`;
   if (msg.startsWith("[后端]")) return `🖥 ${msg}`;
   if (msg.includes("HTTP 5")) return `🖥 后端错误 (${msg})`;
   return `⚠ ${msg}`;

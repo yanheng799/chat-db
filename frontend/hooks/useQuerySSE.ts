@@ -6,9 +6,9 @@ import { useChatStore } from "@/stores/chat";
 /**
  * React hook wrapping the chat store's SSE query actions.
  *
- * Encapsulates {@link import('@microsoft/fetch-event-source').fetchEventSource}
- * via the Zustand store — POST /api/query with X-Session-Id header,
- * 60s AbortController timeout, and onmessage parsing for 5 SSE event types
+ * Delegates to the Zustand store — POST /api/query with X-Session-Id header,
+ * read via a manual fetch + ReadableStream loop (no auto-reconnect), an
+ * AbortController idle-timeout, and dispatch for 5 SSE event types
  * (status / result / error / need_confirm / done).
  */
 export function useQuerySSE() {

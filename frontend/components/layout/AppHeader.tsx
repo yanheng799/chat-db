@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Search } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { apiPort } from "@/lib/api";
 import { Kbd, Tooltip } from "@/components/ui";
 import { useChatStore } from "@/stores/chat";
 import { DataSourceSwitcher } from "@/components/workbench/DataSourceSwitcher";
@@ -90,7 +91,7 @@ export function AppHeader() {
             backendUnreachable ? "bg-destructive" : "bg-success",
           )}
         />
-        :8000
+        :{apiPort}
       </span>
     </header>
   );

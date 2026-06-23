@@ -343,10 +343,16 @@ async def run_learning(
                   l0_count, l1_count, l2_count, fk_inferred, (_time.monotonic() - _t0) * 1000)
 
         # Knowledge base refresh (Phase 3): non-fatal, independent of learning status.
+        # Surface failures as a warning rather than silently suppressing: a
+        # failed refresh leaves the new inferred-FK rows in PostgreSQL but the
+        # Neo4j graph stale — the "PG has it, graph doesn't" state that makes
+        # JOIN paths silently fall back to LLM guessing.
         _log.info("learn: knowledge-refresh start ds=%s", data_source_id)
-        with contextlib.suppress(Exception):
+        try:
             await _refresh_knowledge_with_ds(session, data_source_id)
             _log.info("learn: knowledge-refresh done ds=%s (%.0fms)", data_source_id, (_time.monotonic() - _t0) * 1000)
+        except Exception as exc:  # noqa: BLE001 — refresh is best-effort; must not fail learning
+            _log.warning("learn: knowledge-refresh FAILED ds=%s: %r", data_source_id, exc)
 
         # Enum alias seed collection (Phase 4): auto-populate from L1 detected_enum_values.
         with contextlib.suppress(Exception):

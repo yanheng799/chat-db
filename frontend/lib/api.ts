@@ -1,5 +1,17 @@
 const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
+  process.env.NEXT_PUBLIC_API_BASE || "http://localhost:9000";
+
+let _apiUrl: URL | null = null;
+try {
+  _apiUrl = new URL(API_BASE);
+} catch {
+  _apiUrl = null;
+}
+
+/** 后端 host:port，用于诊断文案，例如 "localhost:9000"。 */
+export const apiHost = _apiUrl?.host ?? API_BASE;
+/** 后端端口，用于诊断文案，例如 "9000"。 */
+export const apiPort = _apiUrl?.port ?? "";
 
 async function request<T>(
   method: string,
